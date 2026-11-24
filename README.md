@@ -11,7 +11,7 @@ A fully differentiable Earth-system coupler in JAX.
 JAX-ESM (`jem`) does not implement a climate model of its own: it couples
 independently-developed components — the JCM spectral atmosphere from
 [jax-gcm](https://github.com/climate-analytics-lab/jax-gcm) (SPEEDY or
-ICON/ECHAM physics), JEM's own slab ocean, bucket land and sea-ice models, and
+ICON/ECHAM physics), JEM's own slab ocean, land (bucket or slab) and sea-ice models, and
 the [Veros](https://github.com/meteorologytoday/veros-jittable) ocean GCM —
 into one JIT-compiled, end-to-end differentiable `jax.lax.scan` trajectory.
 Every component's physical parameters travel in the scan carry as pytrees, so
@@ -146,7 +146,10 @@ protocol):
   `WintonSeaiceModel` — Winton's thermodynamic snow-and-ice model, with an
   energy budget and optional ice transport.
 - `BucketLandModel` — a two-layer soil-water bucket under the atmosphere's own
-  land.
+  land (`land=bucket`); `SlabLandModel` — JEM's own land (`land=slab`):
+  temperature, snow, the same soil-water bucket, vegetation and albedo, with
+  the atmosphere's built-in land switched off. Without a land component
+  (`land=none`, the default) the land is the atmosphere's own.
 - `VerosComponent` — the Veros ocean GCM (optional dependency).
 - `SlabAtmosphereModel` — an idealized atmosphere, for tests and examples with
   no climate in them.

@@ -62,7 +62,9 @@ rediagnose:
   which fields the coupling supplies, and `initialize()` collapses exactly
   those to the climatology at the run's start date; every other field keeps
   its time series, so a land surface in a run built with `land=none` still
-  follows the seasonal cycle. The names are a property of the *coupled
+  follows the seasonal cycle. (With `land=slab` the land's temperature and snow
+  cover, `stl_am` and `snowc_am`, are exchanged and so collapsed: the land
+  component carries their seasonal cycle.) The names are a property of the *coupled
   model*, not the atmosphere — `jem.runners.build_coupler` reads them off
   the built coupling table with `jem.exchangers.exchanged_fields(exchangers,
   "atm")` — so a hand-written exchanger has to declare the same set

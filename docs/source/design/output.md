@@ -134,7 +134,10 @@ The conventions, which are JCM's:
   derived `total_heat_flux`; the sea ice writes
   `forcing_sea_surface_temperature` for the field the ocean published as
   `sea_surface_temperature`; the bucket land writes `forcing_precipitation`
-  and `forcing_evaporation`; and Veros writes `forcing_heat_flux`,
+  and `forcing_land_evaporation`, and the slab land those two and
+  `forcing_land_total_heat_flux` (the land tile's fluxes, so that they do not
+  collide with the `forcing_evaporation` and `forcing_total_heat_flux` a
+  Winton ice, forced by the same fluxes over the sea part, writes); and Veros writes `forcing_heat_flux`,
   `forcing_freshwater_flux`, `forcing_surface_taux`, `forcing_surface_tauy`,
   `forcing_surface_air_temperature` and `forcing_runoff_mass_rate` for the
   six fields an exchanger hands it, keeping plain names for the `temp`,

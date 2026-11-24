@@ -76,7 +76,7 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
                           sea_total_heat_flux, sea_total_freshwater_flux,
                           sea_evaporation, sea_eastward_wind_stress,
                           sea_northward_wind_stress, sea_fraction,
-                          land_evaporation,
+                          land_evaporation, land_total_heat_flux,
                           downward_shortwave_flux, downward_longwave_flux,
                           wind_speed, normalized_surface_pressure,
                           sea_air_temperature, sea_air_specific_humidity,
@@ -148,7 +148,8 @@ contract's per-tile fields by tile *name* (`SurfaceExchange.tile`, never an
 assumed index): SPEEDY's `sea` tile, or the fraction-weighted mean of a
 `water` and a `sea_ice` tile (`exchange_fields.sea_tile`). They are what the
 standard exchange tables hand an ocean; the land part's flux stays with the
-atmosphere's own land surface (SPEEDY's slab land). `sea_fraction` is the
+atmosphere's own land surface (SPEEDY's slab land), or goes to a `SlabLandModel`
+through `land_total_heat_flux` (below). `sea_fraction` is the
 part of the cell they are over, `1 - fmask` of the atmosphere's terrain, by
 which a regridder weights them ({doc}`exchange`). Precipitation is one
 field over the whole cell, so it has no sea tile. A package that publishes
@@ -160,6 +161,25 @@ cell will then also receive the land part's flux (jax-esm#147).
 soil supplies ({doc}`bucket_land`); with no land tile it is the grid mean, and
 `JCMComponent.publishes_land_evaporation` is `False`, which
 `default_exchanges` refuses to force a land with.
+
+`land_total_heat_flux` is the net heat flux over the same land tile, in W m⁻²
+and positive upward like every heat flux here (jax-gcm's `net_heat_flux` is
+positive down, so it is negated once, at the boundary). It is what a land that
+integrates its own temperature, `SlabLandModel`, is forced by
+({doc}`slab_land`), and with the sea part's flux it adds up to the grid mean,
+`sea_fraction * sea_total_heat_flux + (1 - sea_fraction) *
+land_total_heat_flux == total_heat_flux`, so a coastal cell's energy is
+neither applied twice nor dropped. Like `land_evaporation` it falls back to the
+grid mean where the package publishes no land tile.
+
+`JCMComponent.integrates_land_temperature` says whether the atmosphere's own
+physics evolves the land's temperature: true when any term of its physics has
+a `land_model` other than `"prescribed"` (SPEEDY's default slab land, ECHAM's
+SLIM). It is read off the physics' static term attributes, nothing is
+integrated, and `check_land_coupling` uses it to refuse a `SlabLandModel` under
+an atmosphere that would be a second slab on the same land. To use that land,
+build the atmosphere with SPEEDY's land prescribed
+(`speedy_physics(land_model="prescribed")`), as `land=slab` does.
 
 The rest are what a sea ice that solves its own surface energy balance reads
 ({doc}`winton_seaice`), taken unchanged from the contract: the downward

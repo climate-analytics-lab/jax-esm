@@ -85,7 +85,7 @@ overridable by name). Everything the bundle selects comes with it, and the
 configuration's own overrides still apply on top; what does not follow is a
 file tied to the old grid (the T30 climatology, the mixed-grid ESMF weights),
 a surface component the new physics cannot couple (the Winton ice and the
-bucket land need SPEEDY's flux tiles), and the fit itself, which belongs to
+bucket and slab lands need SPEEDY's flux tiles), and the fit itself, which belongs to
 SPEEDY at T31.
 
 **The group-name collision, and why the run group is `coupled_run`.** Hydra
@@ -159,6 +159,16 @@ after the atmosphere was built, so without the key the atmosphere is built in
 float32 and stepped in float64 -- a mix whose composition depends on what
 jax-gcm had allocated at the flip. The runner has no `if ocean is veros`; it
 only applies the key.
+
+**One option can set a key in another group.** `land=slab` has the same
+`# @package _global_` header: choosing JEM's land has to turn the atmosphere's
+own land off
+(`atmosphere.physics.terms.speedy_surface_flux.land_model: prescribed`), or two
+slabs would integrate the land's temperature, so both are set by the one
+option rather than left to two overrides that can disagree
+({doc}`slab_land`). The runner has no `if land is slab` either; the coupling
+refuses the inconsistent pairing (`check_land_coupling`) and logs which land it
+has.
 
 After the components are built the runner compares the flag with what it
 expected (the requested value, or what the process had when the key was

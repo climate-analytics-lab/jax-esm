@@ -79,6 +79,7 @@ datasets = coupler.to_xarray(diagnostics)
 | {doc}`configuration` | The Hydra config groups, jax-gcm's groups re-rooted under `atmosphere`, the wiring-only rule |
 | {doc}`jcm_adapter` | The pinned jax-gcm revision and integration points; `JCMComponent`, the surface-exchange reader |
 | {doc}`bucket_land` | `BucketLandModel`: the soil-water bucket under the atmosphere's own land, its budget and its drainage tuning |
+| {doc}`slab_land` | `SlabLandModel`: JEM's own land (temperature, snow, soil water, vegetation, albedo), the choice between it and the atmosphere's built-in land, and how it is coupled |
 | {doc}`winton_seaice` | `WintonSeaiceModel`: the thermodynamic snow-and-ice model, its energy budget, optional ice transport, and how it is coupled |
 | {doc}`differentiating_long_runs` | `jem.adjoint`: gradients of long, high-resolution runs, and the Veros adjoint's known gaps |
 

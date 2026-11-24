@@ -64,6 +64,7 @@ Components
    jem.components.slab.slab_seaice_model
    jem.components.slab.slab_atmosphere_model
    jem.components.slab.bucket_land_model
+   jem.components.slab.slab_land_model
    jem.components.slab.winton_seaice_model
    jem.components.slab.winton_seaice_model.winton_seaice_model
    jem.components.slab.winton_seaice_model.ice_transport

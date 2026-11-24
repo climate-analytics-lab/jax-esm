@@ -37,6 +37,7 @@ settings into Python, which is exactly the drift the door exists to prevent.
 | Aquaplanet with ECHAM physics | `python -m jem.main +configuration=aquaplanet-slab-echam` (jax-gcm's `t63-echam-1m` atmosphere, T63 with 47 levels, over the free slab ocean; about half an hour per simulated day on 16 CPU threads, and the first run fetches jax-gcm's data mirror) |
 | Earth-like with ECHAM physics | `python -m jem.main +configuration=earth-slab-echam` (jax-gcm's `t63-echam-1m` configuration unchanged, over a slab ocean relaxed to its forcing file's SST; append `configuration@atmosphere=t63-echam-2m` for another jax-gcm atmosphere) |
 | Earth-like with Winton sea ice | `python -m jem.main +configuration=earth-slab-winton` (`earth-slab`, so calibrated SPEEDY at the 30-minute step, with the thermodynamic Winton ice and a freezing-clamped ocean) |
+| Earth-like with JEM's slab land | `python -m jem.main +configuration=earth-slab land=slab` (`earth-slab` with the land's temperature, snow and soil water evolved by `SlabLandModel`; the one option also switches SPEEDY's own land off) |
 | Long aquaplanet at T106 | `python -m jem.main +configuration=aquaplanet-slab coupled_run=long_run atmosphere.grid.spectral_truncation=106 atmosphere.run.time_step=10` |
 | Double drake with a Veros ocean | `python -m jem.main +configuration=veros-double-drake` |
 | Earth with a Veros ocean and the Winton sea ice | `python -m jem.main +configuration=veros-earth` (the thermodynamic Winton ice on the ocean's grid, a freezing-clamped ocean, and SPEEDY's coupled-calibrated parameters) |

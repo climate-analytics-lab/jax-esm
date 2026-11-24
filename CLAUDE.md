@@ -193,6 +193,7 @@ jem/                             # Main package
 │       ├── slab_ocean_model/    # SlabOceanModel  (mixed layer, freeze/melt potential)
 │       ├── slab_seaice_model/   # SlabSeaiceModel (ice fraction diagnosed from SST)
 │       ├── bucket_land_model/   # BucketLandModel (soil water; the land's temperature is SPEEDY's)
+│       ├── slab_land_model/     # SlabLandModel (land temperature, snow, vegetation, albedo; the bucket's soil water)
 │       ├── winton_seaice_model/ # WintonSeaiceModel (thsice port: snow + two ice layers, frazil)
 │       └── slab_atmosphere_model/  # SlabAtmosphereModel (idealized, for tests)
 │           # each model directory holds a params.py: its flax.struct parameters
@@ -359,10 +360,18 @@ including the three whose value changed.
   (1 = all land). A cell can hold both surfaces: `land_mask` is
   `fractional_mask > 0` and `ocean_mask` is `fractional_mask < 1`, and each
   surface is forced by the atmosphere's flux over its own part of the cell
-  (the `sea_*` fields for an ocean), never by the grid-cell mean.
-- The land's temperature in a JCM run is the atmosphere's own (SPEEDY's slab
-  land, inside jax-gcm). A JEM land component (`BucketLandModel`) evolves
-  only the soil water, forced by the land tile's evaporation.
+  (the `sea_*` fields for an ocean, the `land_*` fields for a land), never by
+  the grid-cell mean.
+- Exactly one land evolves the land's temperature. By default it is the
+  atmosphere's own (SPEEDY's slab land, inside jax-gcm), and a
+  `BucketLandModel` (`land=bucket`) evolves only the soil water, forced by the
+  land tile's evaporation. A `SlabLandModel` (`land=slab`) evolves the
+  temperature itself, forced by the land tile's heat flux, and hands it to the
+  atmosphere as `stl_am`; the atmosphere's own land must then be *prescribed*
+  (`speedy_physics(land_model="prescribed")`, which `land=slab` sets), or two
+  slabs are warmed by the same flux. `jem.exchangers.check_land_coupling`
+  refuses that pairing, and both land models run the same soil-water code
+  (`jem.components.slab.bucket_land_model`).
 
 ### Output conventions
 A coupled run writes one dataset per component, and they are only useful
@@ -400,6 +409,10 @@ conventions are JCM's, and every component follows them:
   the prefix the merge of their datasets collides on the shared name. A new
   output variable that comes from `carry["forcing"]` goes through
   `forcing_variable()`; one that comes from `state` or `derived` does not.
+  The prefix does not separate two *receivers* of the same flux over
+  different parts of a cell (a land and a Winton sea ice both take an
+  evaporation), so a land writes its tile's fluxes under the tile's name:
+  `forcing_land_evaporation`, `forcing_land_total_heat_flux`.
 - **Every variable is also tagged with its role**, `jem_role` — `state`,
   `derived` or `forcing` — by `jem.base.component.role_attrs(role)`, so that
   `ds.filter_by_attrs(jem_role="forcing")` answers the question without parsing

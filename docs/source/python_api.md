@@ -257,11 +257,12 @@ reads jax-gcm's packaged T30 terrain and climatology (the files
 import jax_datetime as jdt
 import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
 
 from jem import Coupler, default_exchangers, exchanged_fields
 from jem.components import (
-    BucketLandModel, JCMComponent, SlabOceanModel, WintonSeaiceModel,
+    BucketLandModel, JCMComponent, SlabLandModel, SlabOceanModel, WintonSeaiceModel,
 )
 from jem.components.slab import SlabGrid, SlabOceanParameters, WintonSeaiceParameters
 from jem.config import package_data_path
@@ -290,6 +291,34 @@ def run_two_steps(components):
 land = BucketLandModel(grid, soil_water_clim_file=climatology)
 carry, _ = run_two_steps({"atm": JCMComponent(atm_model), "ocn": SlabOceanModel(grid), "lnd": land})
 
+# The slab land evolves the land's temperature as well, so the atmosphere's own
+# land has to be switched off: SPEEDY is built with its land prescribed, and
+# reads the temperature and snow cover the land hands it. Coupling this land
+# under the default atmosphere above raises a ValueError. The climatology file
+# is the atmosphere's own, read under jax-gcm's variable names (`snowc` is a
+# depth over the cover scale, hence units "cover"), and land ice is told from
+# soil by the file's background albedo, as SPEEDY's own land does; this is
+# what `land=slab` builds.
+prescribed_land_model = jcm.model.Model(
+    coords=coords, terrain=terrain, start_time=start_date,
+    physics=speedy_physics(land_model="prescribed"),
+)
+land = SlabLandModel(
+    grid,
+    land_clim_file=climatology,
+    land_surface_temperature_varname_in_clim_file="stl",
+    snow_depth_varname_in_clim_file="snowc",
+    snow_depth_units_in_clim_file="cover",
+    soil_water_availability_varname_in_clim_file="soilw_am",
+    surface_albedo_varname_in_clim_file="alb",
+    land_surface_temperature_from_clim_file=True,
+    snow_depth_from_clim_file=True,
+    initialize_from_clim_file=True,
+    glacier_fraction_from_albedo=True,
+)
+carry, _ = run_two_steps(
+    {"atm": JCMComponent(prescribed_land_model), "ocn": SlabOceanModel(grid), "lnd": land})
+
 # The Winton sea ice has an energy budget, so the ocean beside it has to clamp at
 # freezing and hand it the deficit. `ice_clim_file` is the initial cover only;
 # `transport=True` also advects and diffuses the ice.
@@ -308,6 +337,25 @@ What a user has to know about each, beyond the constructor:
   the land's temperature itself. It is refused under an atmosphere with no land
   tile (ECHAM). CLI: `land=bucket +land.soil_water_clim_file=...`;
   {doc}`design/bucket_land` has the budget.
+- **`SlabLandModel(grid, params=None, *, name="lnd", land_clim_file=None,
+  ...)`** evolves the land's temperature, snow, soil water (the same bucket)
+  and vegetation fraction, and diagnoses an albedo that nothing reads yet. It
+  is forced by the atmosphere's heat flux and evaporation over the *land
+  tile*, and hands back the temperature (`stl_am`), snow cover (`snowc_am`)
+  and soil water availability (`soilw_am`). It needs a grid with cell areas
+  and, for the climatology, a file on the grid. Which parts follow the file is
+  a `*_from_clim_file` flag each (`land_surface_temperature_from_clim_file`
+  relaxes the temperature to it, SPEEDY's scheme), with the variable's name in
+  the file a `*_varname_in_clim_file` argument;
+  `glacier_fraction_from_albedo=True` marks land ice from the file's
+  background albedo. It has to go with an
+  atmosphere whose own land is prescribed
+  (`speedy_physics(land_model="prescribed")`): under one that integrates its
+  own, `default_exchanges` raises before anything is stepped, and it is
+  refused under an atmosphere with no land tile (ECHAM). CLI: `land=slab`,
+  which also prescribes SPEEDY's land
+  (`+configuration=earth-slab land=slab`); {doc}`design/slab_land` has the
+  model, the choice between the two lands and what the model leaves out.
 - **`WintonSeaiceModel(grid, params=None, *, name="seaice", transport=False,
   frozen_precipitation_latent_heat_release_mode=True, ice_clim_file=None)`**.
   `default_exchangers` forces it from the atmosphere's sea tile and routes the

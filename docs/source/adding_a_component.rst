@@ -139,7 +139,8 @@ objects. So the carry structure the adapter adopts is
             sea_evaporation,
             sea_eastward_wind_stress, sea_northward_wind_stress,
             sea_fraction,           # the sea part of the cell they are over
-            land_evaporation,       # the land tile's evaporation, for a land
+            land_evaporation,       # the land tile's evaporation and
+            land_total_heat_flux,   # heat flux (up), for a land
             downward_shortwave_flux, downward_longwave_flux,  # surface radiation,
             wind_speed, normalized_surface_pressure,          # air over the sea part
             sea_air_temperature, sea_air_specific_humidity,   # and precipitation by

@@ -100,14 +100,27 @@ shaped differently can still be coupled, with a hand-written exchanger.
 | `atm.derived.land_evaporation` | `lnd.forcing.evaporation` |
 | `lnd.derived.soil_water_availability` | `atm.forcing.soilw_am` |
 
+A land that evolves its own temperature (`SlabLandModel`, {doc}`slab_land`)
+adds `SLAB_LAND_EXCHANGES` to this table, and to the Veros one:
+
+| source | destination |
+| --- | --- |
+| `atm.derived.land_total_heat_flux` | `lnd.forcing.total_heat_flux` |
+| `lnd.state.land_surface_temperature` | `atm.forcing.stl_am` |
+| `lnd.state.snow_cover` | `atm.forcing.snowc_am` |
+
 A row survives only if **both** its components are present, so an
 atmosphere/ocean pair gets two. A Winton sea ice ({doc}`winton_seaice`)
 replaces the first row with `WINTON_SEAICE_EXCHANGES`: it takes the
 atmosphere's state and its flux over the sea part, passes the ocean what it
 does not keep (`seaice.derived.ocean_heat_flux_up`), and hands the atmosphere
 its fraction and skin temperature. The land rows are the bucket's soil water
-({doc}`bucket_land`): the land tile's evaporation, never the cell mean, so
-`default_exchanges` refuses them under an atmosphere with no land tile. The wiring is by *name* — `("atm", "ocn",
+({doc}`bucket_land`) and, for a land with a temperature, its heat flux: the
+land tile's evaporation and heat flux, never the cell mean, so
+`default_exchanges` refuses them under an atmosphere with no land tile. It also
+refuses a `SlabLandModel` under an atmosphere that integrates its own land
+temperature, which would be a second slab warmed by the same flux
+(`check_land_coupling`). The wiring is by *name* — `("atm", "ocn",
 "lnd", "seaice")` — and a component registered under a name that just
 misses one of those (`ice`, `ocean`, `land`) is left unconnected with a
 warning, because the failure it would otherwise cause is silent: the sea ice
@@ -121,18 +134,26 @@ of the cell — not by the grid-cell mean, which also contains the land part's
 flux. The adapter reads them from the tiles jax-gcm's `SurfaceExchange`
 publishes, by tile name: SPEEDY's `sea` tile, or the fraction-weighted mean
 of a `water` and a `sea_ice` tile
-(`jem.components.jcm.exchange_fields.sea_tile`). The land part stays with
-the atmosphere: SPEEDY integrates its own slab land (`SpeedySurfaceFlux`'s
-default `land_model="slab"`, jax-gcm's `step_slab_land` after
-`land_model.f90`), forced by its own land tile, so no row carries the land's
-temperature; a land component (`land=bucket`) evolves only the soil water
-SPEEDY prescribes.
+(`jem.components.jcm.exchange_fields.sea_tile`). The land part goes to
+the land. By default that is the atmosphere's own: SPEEDY integrates its own
+slab land (`SpeedySurfaceFlux`'s default `land_model="slab"`, jax-gcm's
+`step_slab_land` after `land_model.f90`), forced by its own land tile, so no
+row carries the land's temperature, and a land component `land=bucket`
+evolves only the soil water SPEEDY prescribes. With `land=slab` the land's
+heat flux is a row too: `atm.derived.land_total_heat_flux`, the net heat flux
+over the land tile (positive upward), goes to `SlabLandModel`
+({doc}`slab_land`), which hands back the temperature and snow cover the
+atmosphere's prescribed land reads.
+
 **SPEEDY.** Its grid mean is `(1 - land_fraction) * sea + land_fraction *
 land`, so on one grid the ocean's share and the land's are disjoint and
 together are the cell's flux: the ocean takes the sea part only and the land
-part stays with SPEEDY's slab land. What the land does with its share is
-SPEEDY's: it holds its anomaly at zero on cells with less than `flandmin` of
-land, and its relaxation to the climatology is itself a source and a sink.
+part stays with the land, which is SPEEDY's slab land or `SlabLandModel`.
+What SPEEDY's land does with its share is SPEEDY's: it holds its anomaly at
+zero on cells with less than `flandmin` of land, and its relaxation to the
+climatology is itself a source and a sink. `SlabLandModel` integrates every
+cell with any land and, relaxed to the climatology, has the same source and
+sink ({doc}`slab_land` lists the differences).
 
 **ECHAM.** It publishes no flux tiles (its delivered fluxes are untiled), so
 `sea_tile` finds none and the `sea_*` fields are equal to the grid-cell mean.
@@ -140,7 +161,7 @@ An ocean on a coastal cell therefore also receives the land part's flux, and
 the double count on coastal cells is not removed for ECHAM. The adapter says
 so with a warning at `initialize`
 (`JCMComponent.publishes_sea_tiles` is `False`), and the couplings that need a
-tile refuse ECHAM outright: the bucket land (`publishes_land_evaporation`) and
+tile refuse ECHAM outright: any land (`publishes_land_evaporation`) and
 the Winton sea ice (`publishes_sea_tiles`) raise in `default_exchanges`.
 
 **On another grid the sea fluxes are weighted by the sea part.** A plain

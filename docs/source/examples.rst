@@ -61,7 +61,9 @@ directory into ``outputs/<date>/<time>/``.
      - Calibrated SPEEDY T31L8 (30-minute step) on jax-gcm's packaged T30
        terrain and climatology, over a slab ocean relaxed to the observed SST (30-day relaxation) and a slab
        sea ice started from the observed cover. The land is SPEEDY's own slab
-       land; there is no land component.
+       land; there is no land component. ``land=bucket`` adds a soil-water
+       bucket under it, and ``land=slab`` replaces it with JEM's own slab land
+       (``python -m jem.main +configuration=earth-slab land=slab``).
      - ``python -m jem.main +configuration=earth-slab``
    * - ``earth-slab-echam``
      - jax-gcm's ``t63-echam-1m`` configuration unchanged -- the atmosphere of

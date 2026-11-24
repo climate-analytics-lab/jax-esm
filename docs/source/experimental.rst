@@ -65,7 +65,9 @@ Both compose ``ocean=veros`` with a case setup importable from
 :mod:`jem.components.veros.setups`
 (:mod:`~jem.components.veros.setups.double_drake` /
 :mod:`~jem.components.veros.setups.earth`), and neither has a land component:
-the land is SPEEDY's own slab land inside the atmosphere. ``veros-earth`` has
+the land is SPEEDY's own slab land inside the atmosphere (``land=slab`` would
+hand its temperature to JEM's slab land, which a Veros configuration has to
+be told about: :doc:`design/slab_land`). ``veros-earth`` has
 the Winton sea ice and ``veros-double-drake`` none. Each configuration's own
 comment says why every setting is what it is.
 

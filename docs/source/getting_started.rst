@@ -119,8 +119,12 @@ package spelled out.
      - ``ocean=slab_relax ocean.sst_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
    * - Drop one
      - ``seaice=none``
-   * - Evolve the soil water (the bucket land)
+   * - Evolve the soil water (the bucket land), keeping the atmosphere's own
+       land temperature
      - ``land=bucket +land.soil_water_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
+   * - Evolve the land's temperature, snow and soil water in JEM's slab land
+       (SPEEDY's own land is switched off by the same option)
+     - ``+configuration=earth-slab land=slab``
    * - Use the thermodynamic Winton sea ice
      - ``+configuration=earth-slab-winton`` (or ``veros-earth``), or
        ``seaice=winton +ocean.params.clamp_at_freezing=true`` in another slab
@@ -173,7 +177,7 @@ Several things worth knowing:
   What does not follow automatically: files tied to the old grid (the Earth
   configurations' T30 terrain and climatology are on the T31 grid, and the
   mixed-grid configuration's regridding weights are for T31), the surface
-  components' constraints on the physics (the Winton ice and the bucket land
+  components' constraints on the physics (the Winton ice and the bucket and slab lands
   need SPEEDY's flux tiles), and the parameter fit, which belongs to SPEEDY at
   T31.
 - **The atmosphere has to have a surface.** A physics package is coupled

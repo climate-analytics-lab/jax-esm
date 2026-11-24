@@ -99,10 +99,10 @@ Veros ocean
 Surface components and the atmosphere
 -------------------------------------
 
-**The Winton sea ice and the bucket land need SPEEDY physics.**
+**The Winton sea ice and the land components need SPEEDY physics.**
     ``default_exchangers`` and ``VerosExchange`` raise for the Winton ice
     under an atmosphere that publishes no sea flux tile and for the bucket
-    land under one that publishes no land tile; ECHAM delivers its fluxes
+    or slab land under one that publishes no land tile; ECHAM delivers its fluxes
     untiled and integrates its own sea ice
     (``jem.exchangers.check_winton_coupling`` and ``check_land_coupling``).
     Consequence: of the slab
