@@ -275,6 +275,38 @@ chunk *index* would collide across two runs chunked differently.
 `write_chunk` warns when it overwrites an existing file (normally a rerun
 into the same directory, or a resume that repeats a chunk).
 
+**Provenance.** Matching jax-gcm's convention, `run_chunked` stamps
+flat `jem_prov_*` global attributes (plus `jcm_prov_chunk_wall_seconds`
+for downstream throughput readers) onto every chunk dataset it writes and
+writes a `<component>-<first step:08d>.nc.provenance.json` sidecar beside
+each `.nc` file. The sidecar carries the full composed Hydra config (when
+run through `jem.runners.run`), git SHAs and dirty-tree fingerprints for
+`jem`, `jcm`, `veros` and any other imported editable libraries, the JAX
+precision and device environment, resolved input files (with forced
+content SHA-256 digests for warm-start initial conditions — both
+`atmosphere.init.file` and `coupled_run.initial_condition`), run-shaping
+facts merged from `jcm.provenance`, the atmosphere's effective parameter
+record, and a single `run_hash`. Set `JEM_HASH_INPUTS=1` (or
+`JCM_HASH_INPUTS=1`) to content-hash every recorded input file.
+
+`jem.provenance.start_run(cfg)` is what begins a record and the only call
+that empties one; `jem.runners.run` makes it before it builds the model. A
+run built in Python needs no such call: `run_chunked` opens the record itself
+(`jem.provenance.ensure_started`) and keeps everything recorded before it,
+so a warm start named with `initial_condition` is in the sidecars and in the
+`run_hash` either way. Such a record has no composed config. The record is
+per process, so a script that makes several runs calls
+`jem.provenance.start_run()` before it builds each model, or a later run's
+record carries the earlier run's inputs and creation time.
+
+One gap remains for a run built in Python with a JCM atmosphere:
+`jcm.provenance.collect()` still empties jax-gcm's own registries the first
+time it is called without a `start_run()`, so what the atmosphere recorded
+while it was built (the `dated_input_persistence` fact, for one) is missing
+from the sidecars. Calling `jem.provenance.start_run()` before building the
+model avoids it, since that starts jax-gcm's record too
+([jax-gcm#1236](https://github.com/climate-analytics-lab/jax-gcm/issues/1236)).
+
 `subsample=n` keeps every *n*-th coupling step of the **run**, counting from
 its start rather than from the chunk in hand, so an uninterrupted run, the
 same run in different-length chunks, and a run resumed from a checkpoint
