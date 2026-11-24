@@ -305,8 +305,9 @@ def test_veros_exchange_uses_the_regridders_it_was_given():
         assert any(call is field for call in a2o_calls)
     assert any(call is derived.sea_fraction for call in a2o_calls)
     # The sea surface temperature crosses o2a weighted by Veros' wet mask:
-    # R(wet), R(wet * SST) and the fallback R(SST).
-    assert len(o2a_calls) == 3
+    # R(wet), R(wet * SST) and the fallback R(SST); the first-step mask check
+    # maps the wet mask once more, R(wet).
+    assert len(o2a_calls) == 4
     assert any(call is components["ocn"]["derived"].sea_surface_temperature
                for call in o2a_calls)
 
@@ -620,3 +621,326 @@ def test_veros_exchange_couples_a_land_with_the_table_s_rows():
     np.testing.assert_allclose(result["atm"]["forcing"].sea_surface_temperature, 285.0)
     assert jax.tree_util.tree_structure(result) == jax.tree_util.tree_structure(
         components)
+
+
+@struct.dataclass
+class _ThermalLandForcing:
+    total_heat_flux: jnp.ndarray
+    precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
+
+
+@struct.dataclass
+class _ThermalLandState:
+    land_surface_temperature: jnp.ndarray
+    snow_cover: jnp.ndarray
+
+
+@struct.dataclass
+class _AtmThermalLandDerived:
+    sea_eastward_wind_stress: jnp.ndarray
+    sea_northward_wind_stress: jnp.ndarray
+    sea_total_heat_flux: jnp.ndarray
+    sea_total_freshwater_flux: jnp.ndarray
+    sea_fraction: jnp.ndarray
+    precipitation: jnp.ndarray
+    land_evaporation: jnp.ndarray
+    land_total_heat_flux: jnp.ndarray
+
+
+@struct.dataclass
+class _AtmThermalLandForcing:
+    sea_surface_temperature: jnp.ndarray
+    soilw_am: jnp.ndarray
+    stl_am: jnp.ndarray
+    snowc_am: jnp.ndarray
+
+
+def test_veros_exchange_couples_a_land_with_a_temperature_both_ways():
+    """A land whose forcing has a heat flux evolves its own temperature: the
+    exchanger hands it the land tile's flux and hands the atmosphere its
+    temperature and snow cover, the rows of `SLAB_LAND_EXCHANGES`, on top of
+    the soil-water rows every land gets. The ocean still takes the sea
+    tile's flux, so the two surfaces share the cell's flux between them.
+    """
+    shape = (4,)
+    components = {
+        "atm": {
+            "derived": _AtmThermalLandDerived(
+                jnp.zeros(shape), jnp.zeros(shape),
+                sea_total_heat_flux=jnp.full(shape, 40.0),
+                sea_total_freshwater_flux=jnp.zeros(shape),
+                sea_fraction=jnp.ones(shape),
+                precipitation=jnp.full(shape, 3e-5),
+                land_evaporation=jnp.full(shape, 1e-5),
+                land_total_heat_flux=jnp.full(shape, -25.0)),
+            "forcing": _AtmThermalLandForcing(
+                jnp.full(shape, 290.0), jnp.zeros(shape),
+                stl_am=jnp.full(shape, 280.0), snowc_am=jnp.zeros(shape)),
+        },
+        "ocn": {
+            "forcing": _OcnRunoffForcing(*(jnp.zeros(shape) for _ in range(4)),
+                                         runoff_mass_rate=jnp.zeros(())),
+            "derived": _OcnDerived(sea_surface_temperature=jnp.full(shape, 285.0),
+                                   sea_fraction=jnp.ones(shape)),
+        },
+        "lnd": {
+            "state": _ThermalLandState(
+                land_surface_temperature=jnp.full(shape, 301.5),
+                snow_cover=jnp.full(shape, 0.25)),
+            "forcing": _ThermalLandForcing(*(jnp.zeros(shape) for _ in range(3))),
+            "derived": _LandDerived(jnp.full(shape, 0.4), jnp.asarray(2.5e6)),
+        },
+    }
+    result = VerosExchange()(components, TIME)
+    np.testing.assert_allclose(result["lnd"]["forcing"].total_heat_flux, -25.0)
+    np.testing.assert_allclose(result["atm"]["forcing"].stl_am, 301.5)
+    np.testing.assert_allclose(result["atm"]["forcing"].snowc_am, 0.25)
+    # The rows every land gets, and the ocean's own, are made as well.
+    np.testing.assert_allclose(result["lnd"]["forcing"].precipitation, 3e-5)
+    np.testing.assert_allclose(result["lnd"]["forcing"].evaporation, 1e-5)
+    np.testing.assert_allclose(result["atm"]["forcing"].soilw_am, 0.4)
+    np.testing.assert_allclose(result["ocn"]["forcing"].heat_flux, 40.0)
+    np.testing.assert_allclose(result["ocn"]["forcing"].runoff_mass_rate, 2.5e6)
+    assert jax.tree_util.tree_structure(result) == jax.tree_util.tree_structure(
+        components)
+
+
+# ---------------------------------------------------------------------------
+# VerosExchange with a sea ice (jax-esm#160)
+# ---------------------------------------------------------------------------
+#
+# The fake ocean and atmosphere carry exactly the fields the ice rows read and
+# write; the ice is a real component on a 4 x 3 grid, because what the exchanger
+# has to get right is the real carry layouts of both ice models.
+
+
+@struct.dataclass
+class _AtmIceDerived:
+    sea_eastward_wind_stress: jnp.ndarray
+    sea_northward_wind_stress: jnp.ndarray
+    sea_total_heat_flux: jnp.ndarray
+    sea_total_freshwater_flux: jnp.ndarray
+    sea_fraction: jnp.ndarray
+    downward_shortwave_flux: jnp.ndarray
+    downward_longwave_flux: jnp.ndarray
+    sea_air_temperature: jnp.ndarray
+    sea_air_specific_humidity: jnp.ndarray
+    wind_speed: jnp.ndarray
+    normalized_surface_pressure: jnp.ndarray
+    sea_evaporation: jnp.ndarray
+    rainfall: jnp.ndarray
+    snowfall: jnp.ndarray
+
+
+@struct.dataclass
+class _AtmIceForcing:
+    sea_surface_temperature: jnp.ndarray
+    sice_am: jnp.ndarray
+    sea_ice_temperature: jnp.ndarray
+
+
+@struct.dataclass
+class _OcnIceDerived:
+    sea_surface_temperature: jnp.ndarray
+    sea_fraction: jnp.ndarray
+    ice_frazil_melt_energy: jnp.ndarray
+    clamps_at_freezing: jnp.ndarray
+
+
+def _ice_components(*, ice="winton", clamp=True, sea_surface_temperature=285.0):
+    """Return a JCM-shaped atmosphere over a Veros-shaped ocean, with a real ice."""
+    from jem.components.slab import SlabSeaiceModel, WintonSeaiceModel
+    from tests.unit.slab_test_utils import make_grid
+
+    grid = make_grid()
+    shape = grid.shape
+    full = lambda value: jnp.full(shape, value)  # noqa: E731
+    atm = {
+        "derived": _AtmIceDerived(
+            sea_eastward_wind_stress=full(0.1),
+            sea_northward_wind_stress=full(0.0),
+            sea_total_heat_flux=full(30.0),
+            sea_total_freshwater_flux=full(2e-6),
+            sea_fraction=full(1.0),
+            downward_shortwave_flux=full(100.0),
+            downward_longwave_flux=full(250.0),
+            sea_air_temperature=full(262.0),
+            sea_air_specific_humidity=full(1e-3),
+            wind_speed=full(5.0),
+            normalized_surface_pressure=full(1.0),
+            sea_evaporation=full(1e-5),
+            rainfall=full(0.0),
+            snowfall=full(8e-6),
+        ),
+        "forcing": _AtmIceForcing(full(290.0), full(0.0), full(271.0)),
+    }
+    ocn = {
+        "forcing": _OcnRunoffForcing(*(jnp.zeros(shape) for _ in range(4)),
+                                     runoff_mass_rate=jnp.zeros(())),
+        "derived": _OcnIceDerived(
+            sea_surface_temperature=full(sea_surface_temperature),
+            sea_fraction=1.0 - grid.fractional_mask,
+            ice_frazil_melt_energy=full(5e6),
+            clamps_at_freezing=jnp.asarray(1.0 if clamp else 0.0),
+        ),
+    }
+    model = (WintonSeaiceModel(grid) if ice == "winton"
+             else SlabSeaiceModel(grid, name="seaice"))
+    return {"atm": atm, "ocn": ocn, "seaice": model.initialize()}, model
+
+
+def _with_ice_fluxes(components):
+    """Give the Winton ice's derived heat and freshwater fluxes recognisable values."""
+    ice = components["seaice"]
+    shape = ice["derived"].ice_fraction.shape
+    derived = ice["derived"].replace(
+        ocean_heat_flux_up=jnp.full(shape, -7.0),
+        ocean_freshwater_flux_up=jnp.full(shape, 3e-6),
+        ice_fraction=jnp.full(shape, 0.4),
+        ice_surface_temperature_K=jnp.full(shape, 255.0),
+        ice_area_fraction=jnp.full(shape, 0.4),
+    )
+    return dict(components, seaice=dict(ice, derived=derived))
+
+
+def test_veros_exchange_passes_a_winton_ice_s_fluxes_to_the_ocean_in_place_of_the_atmosphere_s():
+    """The ocean's heat and freshwater are the ice's; the swamp mask is not applied.
+
+    At the freezing point, with a cooling flux, the swamp mask would zero both;
+    here a real ice takes the deficit, so the ocean gets what the ice passes
+    on, whatever the SST.
+    """
+    components, _ = _ice_components(sea_surface_temperature=271.0)
+    components = _with_ice_fluxes(components)
+    result = VerosExchange()(components, TIME)
+    np.testing.assert_array_equal(result["ocn"]["forcing"].heat_flux, -7.0)
+    np.testing.assert_allclose(result["ocn"]["forcing"].freshwater_flux, 3e-6, rtol=1e-6)
+    # The wind stress is still the atmosphere's.
+    np.testing.assert_allclose(result["ocn"]["forcing"].surface_taux, 0.1)
+    # The atmosphere gets the SST, and the ice's fraction and skin temperature.
+    np.testing.assert_allclose(result["atm"]["forcing"].sea_surface_temperature, 271.0)
+    np.testing.assert_allclose(result["atm"]["forcing"].sice_am, 0.4)
+    np.testing.assert_allclose(result["atm"]["forcing"].sea_ice_temperature, 255.0)
+    # The ice is forced by the atmosphere's state, the ocean's SST and its
+    # freeze/melt energy.
+    forcing = result["seaice"]["forcing"]
+    np.testing.assert_allclose(forcing.rsds, 100.0)
+    np.testing.assert_allclose(forcing.rlds, 250.0)
+    np.testing.assert_allclose(forcing.air_temperature, 262.0)
+    np.testing.assert_allclose(forcing.total_heat_flux, 30.0)
+    np.testing.assert_allclose(forcing.evaporation, 1e-5)
+    np.testing.assert_allclose(forcing.frozen_precipitation, 8e-6)
+    np.testing.assert_allclose(forcing.sea_surface_temperature, 271.0)
+    np.testing.assert_allclose(forcing.ice_frazil_melt_energy, 5e6)
+    assert jax.tree_util.tree_structure(result) == jax.tree_util.tree_structure(components)
+
+
+def test_veros_exchange_keeps_the_swamp_mask_for_the_slab_ice():
+    """An SST-diagnosed ice has no energy budget: the ocean keeps the masked atmosphere flux."""
+    components, _ = _ice_components(
+        ice="slab", clamp=False, sea_surface_temperature=271.0)
+    result = VerosExchange()(components, TIME)
+    # +30 W m-2 would cool an ocean already at the freezing point: masked.
+    np.testing.assert_array_equal(result["ocn"]["forcing"].heat_flux, 0.0)
+    np.testing.assert_array_equal(result["ocn"]["forcing"].freshwater_flux, 0.0)
+    np.testing.assert_allclose(
+        result["seaice"]["forcing"].sea_surface_temperature, 271.0)
+    np.testing.assert_allclose(
+        result["atm"]["forcing"].sice_am, components["seaice"]["derived"].ice_fraction)
+    assert jax.tree_util.tree_structure(result) == jax.tree_util.tree_structure(components)
+
+
+def test_veros_exchange_weights_the_ice_rows_like_the_default_table():
+    """On a mixed grid the ice's fraction is weighted by its sea part, its skin by its ice area.
+
+    The atmosphere's fluxes come over the sea tile, weighted by the
+    atmosphere's sea fraction; the fraction is a flux-kind row from the ice
+    and the skin temperature is mapped by the same conservative regridder,
+    weighted by the ice's area share (``jem.exchangers.ROW_WEIGHTS``).
+    """
+    components, _ = _ice_components()
+    components = _with_ice_fluxes(components)
+    calls = []
+
+    def regridder(name):
+        def apply(value):
+            calls.append((name, value))
+            return value
+        apply.__name__ = name
+        return apply
+
+    exchange = VerosExchange(regrid={
+        "a2o_flux": regridder("a2o_flux"), "a2o_state": regridder("a2o_state"),
+        "o2a_flux": regridder("o2a_flux"), "o2a_state": regridder("o2a_state"),
+    })
+    exchange(components, TIME)
+    ice = components["seaice"]["derived"]
+    used = {(name, id(value)) for name, value in calls}
+    assert ("o2a_flux", id(ice.sea_fraction)) in used, "the fraction is weighted by the ice's sea part"
+    assert ("o2a_flux", id(ice.ice_area_fraction)) in used, (
+        "the skin temperature is weighted by the ice's share of the cell")
+    atm = components["atm"]["derived"]
+    assert ("a2o_flux", id(atm.downward_shortwave_flux)) in used
+    assert ("a2o_flux", id(atm.sea_fraction)) in used
+
+
+def test_veros_exchange_refuses_a_mixed_grid_without_the_regridders_an_ice_row_needs():
+    components, _ = _ice_components()
+    exchange = VerosExchange(regrid={"a2o_flux": lambda value: value})
+    with pytest.raises(ValueError, match="o2a_flux"):
+        exchange(components, TIME)
+
+
+@pytest.mark.parametrize(
+    ("ice", "clamp", "message"),
+    [
+        ("winton", False, r"clamp_at_freezing=True \(\+ocean\.clamp_at_freezing=true\)"),
+        ("slab", True, "no energy budget"),
+    ],
+)
+def test_veros_exchange_validate_refuses_an_ice_the_ocean_s_clamp_does_not_fit(
+    ice, clamp, message,
+):
+    components, _ = _ice_components(ice=ice, clamp=clamp)
+    with pytest.raises(ValueError, match=message):
+        VerosExchange().validate(components)
+
+
+def test_veros_exchange_validate_refuses_a_clamp_with_no_ice():
+    components, _ = _ice_components()
+    del components["seaice"]
+    with pytest.raises(ValueError, match="no sea ice to take the deficit"):
+        VerosExchange().validate(components)
+
+
+def test_veros_exchange_validate_accepts_the_matched_pairs():
+    for ice, clamp in (("winton", True), ("slab", False)):
+        components, _ = _ice_components(ice=ice, clamp=clamp)
+        VerosExchange().validate(components)
+    components, _ = _ice_components(clamp=False)
+    del components["seaice"]
+    VerosExchange().validate(components)
+
+
+def test_veros_exchange_refuses_an_ice_whose_sea_is_not_the_wet_mask():
+    components, _ = _ice_components()
+    ice = components["seaice"]
+    bad = dict(components, seaice=dict(ice, derived=ice["derived"].replace(
+        sea_fraction=0.5 * jnp.ones_like(ice["derived"].sea_fraction))))
+    with pytest.raises(ValueError, match="differs from Veros' wet mask in 12 cell"):
+        VerosExchange().validate(bad)
+    VerosExchange.check_ice_mask(np.ones((4, 3)), np.ones((4, 3)))
+    with pytest.raises(ValueError, match="wet mask"):
+        VerosExchange.check_ice_mask(np.ones((4, 3)), np.ones((3, 4)))
+
+
+def test_veros_exchange_checks_the_ice_mask_on_the_first_step_of_a_run():
+    components, _ = _ice_components()
+    ice = components["seaice"]
+    bad = dict(components, seaice=dict(ice, derived=ice["derived"].replace(
+        sea_fraction=0.5 * jnp.ones_like(ice["derived"].sea_fraction))))
+    exchange = VerosExchange()
+    with pytest.raises(Exception, match="wet mask"):
+        jax.block_until_ready(jax.jit(exchange)(bad, TIME))
+    jax.block_until_ready(jax.jit(exchange)(components, TIME))

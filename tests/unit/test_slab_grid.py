@@ -14,6 +14,7 @@ from jcm.utils import data_to_xarray
 from jem.components.slab import grid as grid_module
 from jem.components.slab.grid import SlabGrid, to_degrees
 from jem.components.slab.slab_ocean_model import SlabOceanModel
+from jem.components.slab.slab_seaice_model import SlabSeaiceModel
 from tests.unit.slab_test_utils import (
     make_grid,
     run_steps,
@@ -230,10 +231,101 @@ def test_to_xarray_curvilinear_uses_auxiliary_coordinates():
     dataset = model.to_xarray(diagnostics, time_axis(2))
 
     assert dataset["sea_surface_temperature"].dims == ("time", "x", "y")
-    assert dataset["lat"].dims == ("x", "y")
-    assert dataset["sea_surface_temperature"].attrs["coordinates"] == "lat lon"
+    assert dataset["latitude"].dims == dataset["longitude"].dims == ("x", "y")
+    # Named differently from the atmosphere's 1-D ``lon``/``lat`` dimension
+    # coordinates, so a merge cannot lose them.
+    assert "lon" not in dataset.variables and "lat" not in dataset.variables
+    assert (
+        dataset["sea_surface_temperature"].attrs["coordinates"]
+        == "longitude latitude"
+    )
+    assert dataset["longitude"].attrs["standard_name"] == "longitude"
+    assert dataset["latitude"].attrs["units"] == "degrees_north"
     # CF reserves ``axis`` for true coordinate variables.
-    assert "axis" not in dataset["lat"].attrs
+    assert "axis" not in dataset["latitude"].attrs
+    np.testing.assert_array_equal(
+        dataset["latitude"].values, to_degrees(grid.latitude_radian))
+
+
+def _displaced_pole_datasets(n_records=2):
+    """Return the displaced-pole ocean's and sea ice's datasets, built by ``to_xarray``."""
+    grid = SlabGrid.from_scrip(str(DISPLACED_POLE_SCRIP))
+    datasets = {}
+    for model in (SlabOceanModel(grid), SlabSeaiceModel(grid, name="seaice")):
+        _, diagnostics = run_steps(model, model.initialize(), n_records)
+        datasets[model.name] = model.to_xarray(diagnostics, time_axis(n_records))
+    return datasets
+
+
+def test_a_merged_curvilinear_run_keeps_every_variables_2d_positions(t31_coords):
+    """``xr.merge`` of atmosphere, ocean and sea ice keeps the 2-D positions.
+
+    Named ``lon``/``lat`` the curvilinear components' coordinates collided with
+    the atmosphere's 1-D dimension coordinates of the same names: the merge
+    "succeeded", kept the atmosphere's and silently dropped the others', so
+    ``sea_surface_temperature`` came back with ``time`` as its only coordinate.
+    """
+    datasets = _displaced_pole_datasets()
+    # 2001-01-01 is 11323 days after the epoch (see the time-axis test above).
+    atmosphere = _jcm_like_dataset(t31_coords, 11323.0, 2)
+    for model_name, dataset in datasets.items():
+        dataset["time"] = atmosphere["time"]
+        assert "longitude" in dataset.coords, model_name
+
+    merged = xr.merge([atmosphere, *datasets.values()], join="exact", compat="no_conflicts")
+
+    # The atmosphere's axes are the 1-D ``lon``/``lat``, untouched.
+    assert merged["surface_pressure"].dims == ("time", "lon", "lat")
+    np.testing.assert_array_equal(merged["lon"].values, atmosphere["lon"].values)
+    for name in ("sea_surface_temperature", "ice_fraction"):
+        variable = merged[name]
+        assert variable.dims == ("time", "x", "y"), name
+        assert {"longitude", "latitude"} <= set(variable.coords), name
+        assert variable["longitude"].dims == ("x", "y"), name
+        np.testing.assert_array_equal(
+            variable["latitude"].values,
+            to_degrees(SlabGrid.from_scrip(str(DISPLACED_POLE_SCRIP)).latitude_radian),
+        )
+        assert variable.attrs["coordinates"] == "longitude latitude"
+
+
+def test_two_components_on_one_curvilinear_grid_merge_exactly():
+    """The ocean and the sea ice share ``x``/``y`` and equal 2-D coordinates."""
+    datasets = _displaced_pole_datasets()
+
+    merged = xr.merge(datasets.values(), join="exact", compat="no_conflicts")
+
+    assert merged.sizes["x"] == datasets["ocn"].sizes["x"]
+    np.testing.assert_array_equal(
+        merged["longitude"].values, datasets["ocn"]["longitude"].values)
+    assert {"sea_surface_temperature", "ice_fraction"} <= set(merged.data_vars)
+
+
+def test_curvilinear_components_on_grids_of_different_shapes_do_not_merge():
+    """The convention's limit: ``x``/``y`` carry no values, only a size.
+
+    Two curvilinear grids of different shapes cannot share index dimensions, and
+    xarray refuses the merge with an error naming the conflicting sizes rather
+    than producing a union. (No shipped configuration puts two components on
+    different curvilinear grids; see ``docs/source/design/output.md``.)
+    """
+    ocean = _displaced_pole_datasets()["ocn"]
+    longitude = np.deg2rad(
+        np.array([0.0, 90.0, 180.0, 270.0])[:, None] + np.arange(3)[None, :])
+    latitude = np.deg2rad(
+        np.array([-60.0, 0.0, 60.0])[None, :] + np.arange(4)[:, None])
+    small = SlabGrid(
+        fractional_mask=jnp.zeros((4, 3)),
+        latitude_radian=jnp.asarray(latitude),
+        longitude_radian=jnp.asarray(longitude),
+    )
+    assert not small.is_separable
+    model = SlabSeaiceModel(small, name="small_ice")
+    _, diagnostics = run_steps(model, model.initialize(), 2)
+    other = model.to_xarray(diagnostics, time_axis(2))
+
+    with pytest.raises(ValueError, match="size"):
+        xr.merge([ocean, other], join="exact", compat="no_conflicts")
 
 
 def test_to_xarray_rejects_a_mismatched_time_axis():

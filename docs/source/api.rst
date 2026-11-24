@@ -9,7 +9,7 @@ The coupling core
    :recursive:
 
    jem.base.component
-   jem.base.coupler.Coupler
+   jem.base.coupler
    jem.exchangers
 
 Running a model
@@ -50,6 +50,7 @@ Components
    :recursive:
 
    jem.components.clock
+   jem.components.coordinates
    jem.components.jcm.component
    jem.components.jcm.contract
    jem.components.jcm.exchange_fields
@@ -59,21 +60,37 @@ Components
    jem.components.veros.setups.earth
    jem.components.veros.setups.global_latlon
 
-   jem.components.slab.slab_ocean_model.SlabOceanModel
-   jem.components.slab.slab_ocean_model.SlabOceanParameters
-   jem.components.slab.slab_seaice_model.SlabSeaiceModel
-   jem.components.slab.slab_seaice_model.SlabSeaiceParameters
-   jem.components.slab.slab_atmosphere_model.SlabAtmosphereModel
-   jem.components.slab.slab_atmosphere_model.SlabAtmosphereParameters
-   jem.components.slab.bucket_land_model.BucketLandModel
-   jem.components.slab.bucket_land_model.BucketLandParameters
-   jem.components.slab.winton_seaice_model.WintonSeaiceModel
-   jem.components.slab.winton_seaice_model.WintonSeaiceParameters
-   jem.components.slab.winton_seaice_model.IceSurfaceFluxParameters
-   jem.components.slab.winton_seaice_model.IceTransportGrid
+   jem.components.slab.slab_ocean_model
+   jem.components.slab.slab_seaice_model
+   jem.components.slab.slab_atmosphere_model
+   jem.components.slab.bucket_land_model
+   jem.components.slab.slab_land_model
+   jem.components.slab.winton_seaice_model
+   jem.components.slab.winton_seaice_model.winton_seaice_model
+   jem.components.slab.winton_seaice_model.ice_transport
+   jem.components.slab.grid
+   jem.components.slab.base
 
-   jem.components.slab.grid.SlabGrid
-   jem.components.slab.base.SlabModelBase
+Packages
+--------
+
+The package docstrings, which say where each family of modules above sits.
+A name a package re-exports is documented on the page of the module that
+defines it.
+
+.. autosummary::
+   :toctree: generated
+   :template: autosummary/package.rst
+
+   jem.base
+   jem.components
+   jem.components.jcm
+   jem.components.slab
+   jem.components.veros
+   jem.components.veros.setups
+   jem.data
+   jem.tools
+   jem.utils
 
 Constants and utilities
 -----------------------
@@ -86,6 +103,11 @@ Constants and utilities
    jem.fluxes
    jem.plot
    jem.tools.idealised_terrain
-   jem.utils.esmf_regrid.ESMFRegridder
-   jem.utils.esmf_regrid.ESMFWeights
+   jem.tools.ocean_bathymetry
+   jem.tools.ocean_initial_state
+   jem.tools.veros_earth_terrain
+   jem.tools.veros_earth_ice_mask
+   jem.utils.esmf_regrid
    jem.utils.latlon_weights
+   jem.utils.cycles
+   jem.utils.idealized_distribution

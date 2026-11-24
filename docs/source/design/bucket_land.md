@@ -4,11 +4,15 @@
 evolve the land's temperature: that is the atmosphere's own. jax-gcm
 integrates SPEEDY's slab land (`land_model.f90`) inside its surface-flux term,
 forced by the flux over the land part of each cell, and a second thermal slab
-in JAX-ESM would integrate the same equation twice. What SPEEDY does not
+alongside it would integrate the same equation twice. What SPEEDY does not
 evolve is its soil water: its soil water availability `soilw_am` is a
 prescribed climatology, so the land's evaporation cannot respond to the land
 drying out. The bucket closes that loop. It was written by Tien-Yiao Hsu as
-the soil-water half of JAX-ESM's former thermal slab land (jax-esm#154).
+the soil-water half of a thermal slab land. A land that evolves the
+temperature as well, for a run whose atmosphere's own land is prescribed, is
+`SlabLandModel` ({doc}`slab_land`), which calls this bucket's functions
+(`step_soil_water`, `initial_soil_water`, `soil_water_availability`), so the
+soil water is one implementation however the temperature is evolved.
 
 ## The equations
 

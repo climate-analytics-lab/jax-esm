@@ -1188,3 +1188,32 @@ def test_a_loaded_checkpoint_is_refused_unless_it_is_to_be_reset(tmp_path):
     assert float(reset.components["own"]["value"]) == 3.0
     carry, _ = july.generate_trajectory_function(2)(reset)
     assert int(carry.step) == 2
+
+
+def test_load_carry_restores_every_leaf_including_the_parameters(tmp_path):
+    """`load_carry` is all-or-nothing: a parameter edited since is overridden.
+
+    Choosing the configured parameters instead is the driver's decision, made
+    per use of the checkpoint (``jem.driver``); the coupler's loader is the
+    faithful inverse of ``save_carry`` and so restores the saved value.
+    """
+    from jem.components.slab import SlabOceanModel
+    from jem.components.slab.slab_ocean_model.params import SlabOceanParameters
+    from tests.unit.slab_test_utils import make_grid
+
+    grid = make_grid()
+
+    def model(depth_max):
+        parameters = SlabOceanParameters(mixed_layer_depth_max=depth_max)
+        return Coupler(
+            {"ocn": SlabOceanModel(grid, parameters)},
+            coupling_timestep=COUPLING_TIMESTEP,
+            start_date=START_DATE,
+        )
+
+    saved = model(60.0)
+    saved.save_carry(saved.initialize(), tmp_path / "checkpoint")
+
+    loaded = model(10.0).load_carry(tmp_path / "checkpoint")
+
+    assert float(loaded.components["ocn"]["params"].mixed_layer_depth_max) == 60.0

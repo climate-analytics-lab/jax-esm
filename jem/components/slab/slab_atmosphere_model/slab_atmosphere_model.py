@@ -194,8 +194,15 @@ class SlabAtmosphereModel(SlabModelBase):
                 ),
             ),
             "derived": AtmosphereDerived.zeros(self.grid.shape),
+            # Coupling is lagged, so the first step integrates whatever is here. The
+            # surfaces start at the air's own temperature, so the first step has no
+            # sensible-heat exchange for want of a supplier, where a 0 K surface
+            # would cool the column strongly. Neither the land nor the ocean
+            # overwrites this before the first step.
             "forcing": AtmosphereForcing.zeros(
                 self.grid.shape,
+                land_surface_temperature=mean_air_temperature,
+                sea_surface_temperature=mean_air_temperature,
                 bulk_drag_coefficient=jnp.asarray(constants.bulk_drag_coefficient),
             ),
         }
@@ -210,9 +217,17 @@ class SlabAtmosphereModel(SlabModelBase):
         # separately, and the cell-mean flux is their area-weighted sum.
         land_fraction = self.grid.fractional_mask
 
-        wind_speed = (
+        # The speed is the norm of the wind vector, whose derivative is infinite at
+        # zero, and reverse-mode AD turns that into NaN even though the value is
+        # a plain 0. The double-where form substitutes a safe argument where the
+        # squared speed is zero, so the speed is exactly the norm everywhere and
+        # its gradient at zero wind is 0 (finite; the norm has a cusp there and 0
+        # is the symmetric choice).
+        speed_squared = (
             state.mean_zonal_wind_velocity**2 + state.mean_meridional_wind_velocity**2
-        ) ** 0.5
+        )
+        moving = speed_squared > 0.0
+        wind_speed = jnp.where(moving, jnp.sqrt(jnp.where(moving, speed_squared, 1.0)), 0.0)
         bulk_conductance = (
             constants.surface_air_density
             * forcing.bulk_drag_coefficient

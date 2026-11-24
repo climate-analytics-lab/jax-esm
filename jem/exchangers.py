@@ -9,11 +9,11 @@ becomes field Y of component B, optionally regridded on the way.
 
 :class:`ExchangeSpec` is one row of that table, :class:`Exchange` executes
 it, and :func:`default_exchanges` is the standard atmosphere/ocean/land/
-sea-ice wiring that every example in this repository writes out by hand
-today. A declarative exchange is not more capable than a hand-written one --
+sea-ice wiring, the one a hand-written exchanger would otherwise spell out
+per example. A declarative exchange is not more capable than a hand-written one --
 an exchanger that computes a flux, converts units or blends two fields still
 has to be a function -- but it is checkable: :meth:`Exchange.validate` names
-a mistyped field *before* a run starts, :meth:`Exchange.__repr__` prints
+a mistyped field *before* a run starts, ``Exchange.__repr__`` prints
 the whole coupling as a table, and :func:`exchanged_fields` answers, for one
 component, which of its fields somebody else supplies -- which is what a
 component needs to know before it builds a carry the coupled step can scan.
@@ -21,7 +21,7 @@ component needs to know before it builds a carry the coupled step can scan.
 Carry layout
 ------------
 A spec addresses a field as ``"component.section.field"``, where ``section``
-is one of :data:`SECTIONS` -- ``state``, ``derived`` or ``forcing``. That is
+is one of ``SECTIONS`` -- ``state``, ``derived`` or ``forcing``. That is
 the layout every packaged component uses: the carry is a mapping whose
 ``"state"``, ``"derived"`` and ``"forcing"`` entries are structs
 (``tree_math.struct``, ``flax.struct``) holding the fields, with anything
@@ -51,19 +51,22 @@ workflow couples with a lag of one coupling step. With the default workflow
   from step *n-1*, and the atmosphere sees the sea surface temperature the
   ocean reached at the end of step *n-1*.
 - On the **first** step there is no previous step, so each component receives
-  whatever its ``initialize()`` put in its forcing section -- zeros, for
-  every packaged component. A run therefore begins with one step of
-  uncoupled spin-up: the ocean's first step sees no heat flux at all.
+  whatever its ``initialize()`` put in its forcing section: zeros for the slab
+  ocean, land and sea ice, and physically valid constants for the fields the
+  Winton sea ice cannot take as zero (an air temperature and downward
+  longwave at the freezing point, a wind speed, a surface pressure -- a zero
+  pressure makes the air density infinite). A run therefore begins with one
+  step of uncoupled spin-up: the slab ocean's first step sees no heat flux.
 - The lag is a property of the *workflow*, not of the exchanger: an
   ``["atm", "exchange", "ocn"]`` workflow hands the ocean the atmosphere's
   fluxes from the same step, at the cost of giving the atmosphere a
   two-step-old sea surface temperature. Neither order gives every component
   same-step information; that needs either an iterated (implicit) exchange or
-  a partitioned workflow, which is a follow-up.
+  a partitioned workflow, neither of which this module provides.
 
 Writing the default coupling down in one place is what makes that lag
-reviewable at all: before, every example spelled the same exchange out by
-hand and none of them said what step the fields came from.
+reviewable at all: a hand-written exchange says nothing about what step its
+fields came from.
 """
 
 from __future__ import annotations
@@ -71,6 +74,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import sys
+import types
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
@@ -80,6 +84,36 @@ import jax.numpy as jnp
 from jem.base.component import Carry, Component, CoupledCarry, CouplingTime, Exchanger
 
 logger = logging.getLogger(__name__)
+
+# What is public: everything `jem/__init__.py` re-exports from here, the names
+# the documentation and the examples use, and the tables and constants other
+# modules and the tests import. Every other module-level name (the section,
+# component-name and weight constants, the `_`-prefixed helpers) is an
+# implementation detail of the table and is free to change.
+__all__ = [
+    "ATMOSPHERE_SEA_FRACTION",
+    "DEFAULT_EXCHANGER_NAME",
+    "SLAB_LAND_EXCHANGES",
+    "STANDARD_EXCHANGES",
+    "VEROS_COMPONENT_MODULE",
+    "VEROS_OCEAN_EXCHANGES",
+    "VEROS_SLAB_SEAICE_EXCHANGES",
+    "VEROS_WINTON_SEAICE_EXCHANGES",
+    "WINTON_SEAICE_EXCHANGES",
+    "Exchange",
+    "ExchangeSpec",
+    "check_land_coupling",
+    "check_winton_coupling",
+    "default_exchangers",
+    "default_exchanges",
+    "default_workflow",
+    "exchanged_fields",
+    "land_temperature_source",
+    "read_field",
+    "regrid_weighted",
+    "replace_field",
+    "table_specs",
+]
 
 #: The carry sections a spec may address. See the module docstring.
 SECTIONS = ("state", "derived", "forcing")
@@ -140,6 +174,11 @@ ATMOSPHERE_SEA_PREFIX = "atm.derived.sea_"
 #: component's soil supplies.
 ATMOSPHERE_LAND_EVAPORATION = "atm.derived.land_evaporation"
 
+#: The atmosphere's net surface heat flux over the land part of each cell
+#: (upward positive), which drives a land component that evolves its own
+#: temperature.
+ATMOSPHERE_LAND_HEAT_FLUX = "atm.derived.land_total_heat_flux"
+
 #: The sea part of each cell of a component on the ocean grid, with the
 #: component's name filled in: ``1 - fractional_mask`` for a slab ocean or sea
 #: ice, the wet mask for Veros. A regridded row from one of them onto the
@@ -174,11 +213,12 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("ocn.state.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
     ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
-    # The soil water of a land component (the bucket): the atmosphere's
-    # precipitation, one value per cell, and its evaporation over the land
-    # part, the land tile; the land hands back SPEEDY's soil water
-    # availability. All on the atmosphere's grid. The land's temperature is
-    # the atmosphere's own (SPEEDY's slab land), so no row carries it.
+    # The soil water of a land component: the atmosphere's precipitation,
+    # one value per cell, and its evaporation over the land part, the land
+    # tile; the land hands back SPEEDY's soil water availability. All on the
+    # atmosphere's grid. These three rows are all a bucket land has, since
+    # its temperature is the atmosphere's own (SPEEDY's slab land); a land
+    # that evolves its temperature adds SLAB_LAND_EXCHANGES.
     ("atm.derived.precipitation", "lnd.forcing.precipitation", "flux"),
     (ATMOSPHERE_LAND_EVAPORATION, "lnd.forcing.evaporation", "flux"),
     ("lnd.derived.soil_water_availability", "atm.forcing.soilw_am", "state"),
@@ -199,7 +239,8 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: (``coupling.exchanger``):
 #:
 #: - **wind stress.** The atmosphere publishes its delivered surface stress
-#:   (``derived.eastward_wind_stress``/``northward_wind_stress``) and Veros
+#:   (``derived.sea_eastward_wind_stress``/``sea_northward_wind_stress``,
+#:   its stress over the sea tile) and Veros
 #:   integrates ``forcing.surface_taux/tauy``, but the stress is a *vector*
 #:   in true east/north components, and on a rotated ocean grid it has to be
 #:   rotated into the grid's local frame -- which mixes the two components,
@@ -232,17 +273,38 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("lnd.derived.runoff_mass_rate", "ocn.forcing.runoff_mass_rate", "flux"),
 )
 
+#: What a :class:`~jem.components.slab.slab_land_model.SlabLandModel`
+#: registered as ``"lnd"`` adds to either table, slab or Veros. It evolves the
+#: land's temperature itself, so it takes the atmosphere's net heat flux over
+#: the land part of each cell, and hands the atmosphere the temperature and
+#: the snow cover its land tile reads (SPEEDY's ``stl_am`` and ``snowc_am``,
+#: the latter a cover the atmosphere caps at one). The land is on the
+#: atmosphere's grid, so no row is regridded. The sea part's flux goes to the
+#: ocean (``sea_total_heat_flux``), and the two parts make up the grid-cell
+#: mean, so no part of a cell's flux is applied twice or dropped.
+#:
+#: These rows are only right under an atmosphere whose own land is
+#: *prescribed*, which reads ``stl_am`` as the land's temperature. One that
+#: integrates its own slab land adds its anomaly on top of ``stl_am``, and
+#: two slabs would then both be warmed by the same flux;
+#: :func:`check_land_coupling` refuses that pairing.
+SLAB_LAND_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    (ATMOSPHERE_LAND_HEAT_FLUX, "lnd.forcing.total_heat_flux", "flux"),
+    ("lnd.state.land_surface_temperature", "atm.forcing.stl_am", "state"),
+    ("lnd.state.snow_cover", "atm.forcing.snowc_am", "state"),
+)
+
 #: What a :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceModel`
 #: registered as ``"seaice"`` changes in the standard table. The Winton ice
 #: solves its own surface energy balance, so it takes the atmosphere's state
 #: rather than its fluxes -- the surface radiation, the air over the sea part,
 #: the wind speed and surface pressure, rain and snow -- and the atmosphere's
 #: net heat flux and evaporation over the sea part, which it passes on to the
-#: ocean less what the ice keeps (:data:`WINTON_REPLACES`). It forms frazil ice
+#: ocean less what the ice keeps (``WINTON_REPLACES``). It forms frazil ice
 #: from the deficit the ocean's clamp at freezing removed. It hands the
 #: atmosphere its skin temperature, which SPEEDY blends with the SST by the ice
 #: fraction (``sea_model.f90``'s ``tice_am``); regridded, that temperature is
-#: weighted by the ice's share of each cell (:data:`ROW_WEIGHTS`) and mapped
+#: weighted by the ice's share of each cell (``ROW_WEIGHTS``) and mapped
 #: conservatively, as the fraction is, so an atmosphere cell's
 #: ``sice_am * T_ice`` is the ice-area mean of the ocean cells under it.
 #: ``docs/source/design/winton_seaice.md`` is the contract.
@@ -276,17 +338,63 @@ WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: atmosphere's flux through the ice (``seaice.derived.ocean_heat_flux_up``).
 WINTON_REPLACES = ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux")
 
+#: The rows of :data:`VEROS_OCEAN_EXCHANGES` a Winton sea ice replaces over a
+#: Veros ocean: the ocean takes both its heat and its freshwater flux from the
+#: ice (:data:`VEROS_WINTON_SEAICE_EXCHANGES`), because the ice passes on
+#: everything the ocean receives -- the atmosphere's flux less what the ice
+#: kept, plus the water the ice's growth and melt exchange. Veros has a
+#: salinity, so unlike a slab ocean (where the freshwater flux is a
+#: diagnostic) the freshwater row is part of the coupling.
+VEROS_WINTON_REPLACES = (
+    ("atm.derived.sea_total_heat_flux", "ocn.forcing.heat_flux"),
+    ("atm.derived.sea_total_freshwater_flux", "ocn.forcing.freshwater_flux"),
+)
+
+#: The sea-ice rows of a Veros coupling with the SST-diagnosed
+#: :class:`~jem.components.slab.slab_seaice_model.slab_seaice_model.SlabSeaiceModel`.
+#: The ice takes the ocean's SST and hands the atmosphere its fraction. The
+#: ocean keeps its own fluxes, and :func:`jem.fluxes.mask_fluxes_under_ice` is
+#: its insulation.
+VEROS_SLAB_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    ("ocn.derived.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
+    ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
+)
+
+#: The sea-ice rows of a Veros coupling with a Winton ice, made of the slab
+#: ice's two rows, :data:`WINTON_SEAICE_EXCHANGES` (the ocean's deficit read from
+#: where Veros publishes it, ``derived``, as the slab ocean does), and the
+#: ocean's heat and freshwater forcing taken from the ice. The ocean's heat row
+#: is Veros' ``forcing.heat_flux`` where a slab ocean has
+#: ``forcing.total_heat_flux``; both are upward positive, W m-2. The freshwater
+#: flux is upward positive too, kg m-2 s-1, the sign and unit
+#: :meth:`~jem.components.veros_component.VerosComponent.step` turns into a
+#: salinity forcing.
+VEROS_WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    *VEROS_SLAB_SEAICE_EXCHANGES,
+    *(row for row in WINTON_SEAICE_EXCHANGES
+      if row[:2] != ("seaice.derived.ocean_heat_flux_up",
+                     "ocn.forcing.total_heat_flux")),
+    ("seaice.derived.ocean_heat_flux_up", "ocn.forcing.heat_flux", "flux"),
+    ("seaice.derived.ocean_freshwater_flux_up",
+     "ocn.forcing.freshwater_flux", "flux"),
+)
+
 #: The weight of a regridded row whose destination is listed here, in place
 #: of the sea fraction :func:`default_exchanges` gives a row by default.
-ROW_WEIGHTS = {
+ROW_WEIGHTS: Mapping[str, str] = types.MappingProxyType({
     "atm.forcing.sea_ice_temperature": "seaice.derived.ice_area_fraction",
-}
+})
 
 #: Module holding the Winton sea ice, looked up in ``sys.modules`` for the
 #: reason :data:`VEROS_COMPONENT_MODULE` is: if it was never imported, nothing
 #: in the process is a Winton model.
 WINTON_COMPONENT_MODULE = (
     "jem.components.slab.winton_seaice_model.winton_seaice_model")
+
+#: Module holding the slab land, looked up in ``sys.modules`` the same way.
+SLAB_LAND_COMPONENT_MODULE = (
+    "jem.components.slab.slab_land_model.slab_land_model")
 
 #: Module holding the ocean wrapper whose carry :data:`VEROS_OCEAN_EXCHANGES`
 #: describes. It is looked up in ``sys.modules`` rather than imported: Veros is
@@ -323,7 +431,7 @@ class ExchangeSpec:
     ----------
     src : str
         Where the value is read: ``"component.section.field"``, with
-        ``section`` one of :data:`SECTIONS`.
+        ``section`` one of ``SECTIONS``.
     dst : str
         Where it is written, in the same form.
     regrid : str or None
@@ -417,6 +525,14 @@ def _as_spec(spec: ExchangeSpec | Mapping[str, Any]) -> ExchangeSpec:
         f"An exchange spec must be an ExchangeSpec or a mapping with `src`/"
         f"`dst`; got {type(spec).__name__}."
     )
+
+
+def _array_shape(value: Any) -> tuple[int, ...] | None:
+    """Return the shape of ``value`` if it is one array, else None (a composite)."""
+    if not jax.tree_util.all_leaves([value]):
+        return None
+    shape = getattr(value, "shape", None)
+    return None if shape is None else tuple(shape)
 
 
 def _field_names(section: Any) -> list[str]:
@@ -520,9 +636,20 @@ def regrid_weighted(
         R(weight * value) / R(weight)
 
     weighs each source cell by the area of its sea part instead. On one grid
-    it is ``value`` wherever ``weight > 0``. A destination cell that overlaps
-    no sea at all on the source grid (``R(weight) == 0``) takes ``R(value)``,
-    the only estimate there is.
+    it is ``value`` wherever ``weight > 0``.
+
+    A destination cell with no weight under it (``R(weight) == 0``) takes
+    ``R(value)``: the *unweighted* map of the field, which includes whatever
+    the field holds where the weight is zero. For the Veros ocean's SST that
+    is the fill value over land (273.15 K), a number that is no temperature
+    of any water, so a caller whose destination cells can lack weight must
+    either make that impossible or not use the value there.
+    :class:`jem.fluxes.VerosExchange` makes it impossible for an atmosphere
+    cell with sea in it (its terrain's land fraction is derived from the
+    ocean's wet mask, a conservative map covers every cell the wet mask
+    overlaps, and it raises if a cell is left without), so the fallback
+    reaches only cells that have no sea and whose SST the atmosphere never
+    reads.
 
     Parameters
     ----------
@@ -702,7 +829,7 @@ class Exchange:
             # is here) for one of those two to catch downstream.
             # Typed as Any because `tree_structure` returns an opaque
             # PyTreeDef that static analysis cannot compare, exactly as in
-            # `_require_same_structure` above.
+            # `_require_same_structure` below.
             current_structure: Any = jax.tree_util.tree_structure(current)
             value_structure: Any = jax.tree_util.tree_structure(value)
             if current_structure == value_structure:
@@ -742,10 +869,12 @@ class Exchange:
         :meth:`jem.components.jcm.component.JCMComponent.set_exchanged_forcing`,
         which is how that is arranged).
 
-        Structure only: **shapes and dtypes are deliberately not compared**,
-        because a row that names a regridder legitimately changes shape, and a
-        row between grids of different resolution is the normal case rather
-        than an error.
+        **Shapes** are checked against the row: a row that names a regridder
+        needs a source of the regridder's ``src_shape`` and a destination of
+        its ``dst_shape`` (a regridder that carries neither attribute -- a
+        plain callable -- is not checked), and a row with no regridder is a
+        copy, so its two ends must be the same shape. Dtypes are deliberately
+        not compared: :meth:`__call__` casts to the destination's.
 
         Parameters
         ----------
@@ -759,15 +888,16 @@ class Exchange:
             If a spec names a component, a carry section or a regridder that
             does not exist.
         ValueError
-            If a spec names a field its section does not have, or if its two
-            ends have different pytree structures.
+            If a spec names a field its section does not have, if its two
+            ends have different pytree structures, or if a field's shape does
+            not fit its row (see above).
         TypeError
             If a component's carry is not a mapping, so it has no sections to
             address.
 
         """
         for spec in self.specs:
-            self._regridder(spec)
+            regridder = self._regridder(spec)
             values = {}
             for end, path, (component, section, field) in (
                 ("src", spec.src, spec.src_parts),
@@ -777,6 +907,8 @@ class Exchange:
                 self._require_field(resolved, field, spec, path)
                 values[end] = getattr(resolved, field)
             self._require_same_structure(spec, values["src"], values["dst"])
+            self._require_matching_shapes(
+                spec, regridder, values["src"], values["dst"])
             if spec.weight is not None:
                 weight_shape = jnp.shape(self._weight(components, spec))
                 if weight_shape != jnp.shape(values["src"]):
@@ -786,6 +918,60 @@ class Exchange:
                         f"{weight_shape}; the weight is the fraction of each "
                         "source cell, so it has to be on the source grid."
                     )
+
+    @staticmethod
+    def _require_matching_shapes(
+        spec: ExchangeSpec,
+        regridder: Callable[[Any], Any] | None,
+        source: Any,
+        destination: Any,
+    ) -> None:
+        """Raise, naming the spec, if its fields' shapes do not fit the row.
+
+        A row with a regridder must be handed a field of the regridder's
+        ``src_shape`` and must write one of its ``dst_shape``: a transposed or
+        wrong-grid source is otherwise gathered from with indices that are
+        merely out of range or in the wrong order, and a mismatched destination
+        is only caught by ``lax.scan``, naming neither. A row with **no**
+        regridder is a copy, so its two ends must already be the same shape --
+        and a copy between two grids of the same shape (the packaged
+        ``veros-earth`` pair is 96 x 48 on both sides) is not a map between
+        them, which no shape check can see; that case is for
+        :func:`default_exchanges`, which knows from the component names which
+        rows cross grids.
+
+        Only a field that is a single array has a shape to compare; a composite
+        (a ``TimeSeries``) is skipped. A regridder with no ``src_shape`` /
+        ``dst_shape`` attributes (a plain callable) is not checked.
+        """
+        source_shape = _array_shape(source)
+        destination_shape = _array_shape(destination)
+        if regridder is None:
+            if (
+                source_shape is not None
+                and destination_shape is not None
+                and source_shape != destination_shape
+            ):
+                raise ValueError(
+                    f"Exchange spec {spec} copies {spec.src} of shape "
+                    f"{source_shape} into {spec.dst} of shape "
+                    f"{destination_shape} and names no regridder, so the two "
+                    "components are on different grids and the row needs one."
+                )
+            return
+        for path, shape, attribute in (
+            (spec.src, source_shape, "src_shape"),
+            (spec.dst, destination_shape, "dst_shape"),
+        ):
+            expected = getattr(regridder, attribute, None)
+            if expected is None or shape is None:
+                continue
+            if tuple(expected) != shape:
+                raise ValueError(
+                    f"Exchange spec {spec}: regridder {spec.regrid!r} has "
+                    f"{attribute} = {tuple(expected)}, but {path} has shape "
+                    f"{shape}."
+                )
 
     @staticmethod
     def _require_same_structure(spec: ExchangeSpec, source: Any, destination: Any) -> None:
@@ -851,6 +1037,76 @@ class Exchange:
         _require_field(section, field, f"Exchange spec {spec}", path)
 
 
+def table_specs(
+    table: Iterable[tuple[str, str, str]],
+    present: Iterable[str],
+    regrid: Mapping[str, str],
+) -> list[ExchangeSpec]:
+    """Turn the rows of ``table`` between the ``present`` components into specs.
+
+    The one place a row becomes an :class:`ExchangeSpec`: which regridder it
+    names (from ``regrid``, :func:`default_exchanges`'s keys) and which
+    fraction weights it. :func:`default_exchanges` calls it on the standard
+    table, and :class:`jem.fluxes.VerosExchange` on the sea-ice rows it adds
+    to what it computes itself, so a hand-written exchanger and the table
+    cannot weight the same row differently.
+
+    Raises
+    ------
+    ValueError
+        If ``regrid`` has entries (so this is a mixed-grid coupling) but a
+        row that crosses between the atmosphere's grid and the ocean's finds
+        no regridder in it; see :func:`default_exchanges`.
+
+    """
+    present = set(present)
+    specs: list[ExchangeSpec] = []
+    # The key each grid-crossing row would need, for the rows that got none.
+    unmapped: dict[str, list[str]] = {}
+    for src, dst, kind in table:
+        src_component, _, _ = _parse_path(src, "source", src)
+        dst_component, _, _ = _parse_path(dst, "destination", dst)
+        if not {src_component, dst_component} <= present:
+            continue
+        direction = _grid_direction(src_component, dst_component)
+        name = None
+        if direction is not None:
+            name = regrid.get(f"{direction}_{kind}", regrid.get(direction))
+            if name is None:
+                unmapped.setdefault(f"{direction}_{kind}", []).append(
+                    f"{src} -> {dst}")
+        weight = None
+        if name is not None and dst in ROW_WEIGHTS:
+            weight = ROW_WEIGHTS[dst]
+        elif name is not None and src.startswith(ATMOSPHERE_SEA_PREFIX):
+            weight = ATMOSPHERE_SEA_FRACTION
+        elif name is not None and direction == "o2a":
+            weight = OCEAN_GRID_SEA_FRACTION.format(component=src_component)
+        specs.append(ExchangeSpec(src, dst, name, weight))
+
+    # A run that supplies any regridder is a mixed-grid run, and a crossing row
+    # left without one would be a plain copy: index for index between two
+    # different geographies. `lax.scan` rejects that only when the shapes
+    # differ, and the packaged veros-earth pair (JCM_T31 and
+    # RotatedGaussianLatLon) are both 96 x 48. With no regridder at all the
+    # caller is saying every component shares a grid, which is valid.
+    if regrid and unmapped:
+        rows = "\n".join(
+            f"  {key}: {', '.join(rows)}" for key, rows in sorted(unmapped.items())
+        )
+        raise ValueError(
+            "regrid names regridders for "
+            f"{sorted(regrid)!r}, so this is a mixed-grid coupling, but "
+            f"{len(sum(unmapped.values(), []))} row(s) cross between the "
+            "atmosphere's grid and the ocean's with no regridder, which would "
+            "copy the field index for index between two different grids. Add "
+            f"the missing key(s) {sorted(unmapped)!r} (or the bare direction "
+            f"{sorted({key.split('_')[0] for key in unmapped})!r}), or pass "
+            f"no regrid at all if every component shares one grid:\n{rows}"
+        )
+    return specs
+
+
 def default_exchanges(
     components: Mapping[str, Component] | Iterable[str],
     regrid: Mapping[str, str] | None = None,
@@ -872,40 +1128,57 @@ def default_exchanges(
     ``lnd.derived.soil_water_availability``     ``atm.forcing.soilw_am``
     ==========================================  =======================================
 
+    A land that evolves its own temperature, a
+    :class:`~jem.components.slab.slab_land_model.SlabLandModel` registered as
+    ``"lnd"``, adds :data:`SLAB_LAND_EXCHANGES`:
+
+    ==========================================  =======================================
+    ``atm.derived.land_total_heat_flux``        ``lnd.forcing.total_heat_flux``
+    ``lnd.state.land_surface_temperature``      ``atm.forcing.stl_am``
+    ``lnd.state.snow_cover``                    ``atm.forcing.snowc_am``
+    ==========================================  =======================================
+
+    and is refused under an atmosphere that integrates its own land
+    temperature (:func:`check_land_coupling`).
+
     A row survives only if **both** its components are present, so an
     atmosphere/ocean pair gets two rows. The names are
-    :data:`STANDARD_COMPONENT_NAMES`; a component registered under any other
+    ``STANDARD_COMPONENT_NAMES``; a component registered under any other
     name is not wired by this function.
 
     Which table
     -----------
     The table above describes JAX-ESM's own slab components. A component with
-    a carry of its own needs its own rows, and there is one such table so far:
+    a carry of its own needs its own rows, and there is one such table:
     a :class:`~jem.components.veros_component.VerosComponent` registered as
     ``"ocn"`` selects :data:`VEROS_OCEAN_EXCHANGES` instead, which is the same
     wiring spelled in Veros' field names and with the freshwater flux Veros
     also takes. That constant documents what it cannot express -- above all
-    the wind stress, which is a drag law rather than a copy. The choice is
+    the wind stress, a vector that has to be rotated into the ocean grid's
+    local frame (and is the atmosphere's own stress, not a drag law of JEM's).
+    The choice is
     made by type, so it needs real components: called with just a list of
     *names*, this cannot tell one ocean from another and gives the slab table.
 
     A :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceModel`
     registered as ``"seaice"`` changes the slab table: the ocean's heat-flux
     row is replaced by :data:`WINTON_SEAICE_EXCHANGES`, which force the ice
-    from the atmosphere and route the ocean's flux through it. The pairing is
-    refused over an ocean that does not clamp at freezing, over Veros
-    (jax-esm#160) and under a physics package with no sea flux tile.
+    from the atmosphere and route the ocean's flux through it; over a Veros
+    ocean the ocean's freshwater row is the ice's too
+    (:data:`VEROS_WINTON_SEAICE_EXCHANGES`). The pairing is refused over an
+    ocean that does not clamp at freezing (slab or Veros) and under a physics
+    package with no sea flux tile.
 
     Regridding
     ----------
     ``regrid`` names a regridder for the specs that cross the
     atmosphere/ocean-grid boundary -- the ones between ``atm`` and a
-    component of :data:`OCEAN_GRID_COMPONENTS`. Its keys are
+    component of ``OCEAN_GRID_COMPONENTS``. Its keys are
     ``"<direction>_<kind>"``, or a bare ``"<direction>"`` covering both
     kinds, where
 
     - *direction* is ``"a2o"`` (atmosphere to ocean grid) or ``"o2a"``, and
-    - *kind* is the row's own ``"flux"``/``"state"`` (:data:`KINDS`).
+    - *kind* is the row's own ``"flux"``/``"state"`` (``KINDS``).
 
     That split is the one the mixed-grid example makes by hand: extensive
     quantities -- heat fluxes, an areal ice fraction -- are regridded
@@ -923,13 +1196,20 @@ def default_exchanges(
     ``regrid={"a2o": "a2o", "o2a": "o2a"}``. Rows that stay on one grid
     (``ocn`` to ``seaice``) never get a regridder.
 
+    A ``regrid`` with any entry says the run is mixed-grid, so **every** row
+    that crosses the boundary must find a regridder in it, and one that does
+    not is a ``ValueError`` naming the missing keys: the alternative is a plain
+    copy between two different grids, which nothing downstream can detect when
+    they happen to have the same shape. An empty or ``None`` ``regrid`` is a
+    single-grid run and every row is a copy.
+
     A regridded row that reads one of the atmosphere's ``sea_*`` fields
-    (:data:`ATMOSPHERE_SEA_PREFIX`) -- a flux over the sea part of each cell
+    (``ATMOSPHERE_SEA_PREFIX``) -- a flux over the sea part of each cell
     -- is weighted by that part, :data:`ATMOSPHERE_SEA_FRACTION`, so a coastal
     ocean cell takes nothing from an atmosphere cell that has no sea in it
     (:func:`regrid_weighted`). A regridded row from the ocean grid is
     weighted the same way by its source's own sea fraction
-    (:data:`OCEAN_GRID_SEA_FRACTION`): the SST and ice an atmosphere cell
+    (``OCEAN_GRID_SEA_FRACTION``): the SST and ice an atmosphere cell
     receives are those of the sea under it.
 
     Parameters
@@ -945,6 +1225,13 @@ def default_exchanges(
     -------
     list[ExchangeSpec]
 
+    Raises
+    ------
+    ValueError
+        If ``regrid`` has an unknown key, or has entries but leaves a row that
+        crosses the atmosphere/ocean-grid boundary without a regridder; and
+        for the unsupported component pairings listed above.
+
     """
     present = set(components)
     regrid = dict(regrid or {})
@@ -959,25 +1246,7 @@ def default_exchanges(
             "(\"a2o\", \"o2a\") optionally followed by \"_flux\" or \"_state\"."
         )
 
-    table = _exchange_table(components)
-    specs: list[ExchangeSpec] = []
-    for src, dst, kind in table:
-        src_component, _, _ = _parse_path(src, "source", src)
-        dst_component, _, _ = _parse_path(dst, "destination", dst)
-        if not {src_component, dst_component} <= present:
-            continue
-        direction = _grid_direction(src_component, dst_component)
-        name = None
-        if direction is not None:
-            name = regrid.get(f"{direction}_{kind}", regrid.get(direction))
-        weight = None
-        if name is not None and dst in ROW_WEIGHTS:
-            weight = ROW_WEIGHTS[dst]
-        elif name is not None and src.startswith(ATMOSPHERE_SEA_PREFIX):
-            weight = ATMOSPHERE_SEA_FRACTION
-        elif name is not None and direction == "o2a":
-            weight = OCEAN_GRID_SEA_FRACTION.format(component=src_component)
-        specs.append(ExchangeSpec(src, dst, name, weight))
+    specs = table_specs(_exchange_table(components), present, regrid)
 
     wired = {part for spec in specs
              for part in (spec.src_parts[0], spec.dst_parts[0])}
@@ -1007,7 +1276,7 @@ def default_exchanges(
             )
     _check_freezing_deficit_is_taken(components, specs)
     _check_land_is_forced_by_a_land_tile(components, specs)
-    _check_winton_coupling(components)
+    check_winton_coupling(components)
     return specs
 
 
@@ -1015,29 +1284,105 @@ def _check_land_is_forced_by_a_land_tile(
     components: Mapping[str, Component] | Iterable[str],
     specs: list[ExchangeSpec],
 ) -> None:
-    """Refuse a land component under an atmosphere with no land tile.
+    """Apply :func:`check_land_coupling` to a table that forces a land."""
+    land_sources = {ATMOSPHERE_LAND_EVAPORATION, ATMOSPHERE_LAND_HEAT_FLUX}
+    if not any(spec.src in land_sources for spec in specs):
+        return
+    check_land_coupling(components)
 
-    The land takes the atmosphere's evaporation over the land part of each
-    cell. A physics package that publishes no land flux tile (ECHAM delivers
-    its fluxes untiled) leaves ``land_evaporation`` at the grid-cell mean,
-    which would charge the soil with the sea's evaporation on every coastal
-    cell. Only a real atmosphere can be asked: one without
-    ``publishes_land_evaporation`` (a stand-in, or names alone) is not checked.
+
+def _is_slab_land(components: Mapping[str, Component] | Iterable[str]) -> bool:
+    """Whether ``"lnd"`` evolves its own temperature (never, for a list of names)."""
+    if not isinstance(components, Mapping):
+        return False
+    module = sys.modules.get(SLAB_LAND_COMPONENT_MODULE)
+    return module is not None and isinstance(
+        components.get("lnd"), module.SlabLandModel)
+
+
+def check_land_coupling(
+    components: Mapping[str, Component] | Iterable[str],
+) -> None:
+    """Refuse a land component the atmosphere cannot be coupled to faithfully.
+
+    One rule for every exchange that forces a land: the standard table
+    (:func:`default_exchanges`) and :class:`jem.fluxes.VerosExchange` both
+    call it. Only a real atmosphere can be asked: one without the attributes
+    read here (a stand-in, or names alone) is not checked.
+
+    **It needs a land tile.** The land takes the atmosphere's evaporation
+    over the land part of each cell, and a land that evolves its temperature
+    the net heat flux over it. A physics package that publishes no land flux
+    tile (ECHAM delivers its fluxes untiled) leaves both at the grid-cell
+    mean, which would charge the land with the sea's share on every coastal
+    cell.
+
+    **One land integrates the temperature.** A
+    :class:`~jem.components.slab.slab_land_model.SlabLandModel` hands the
+    atmosphere its temperature as ``stl_am``. An atmosphere whose own land is
+    prescribed reads that as the land's temperature. One that integrates its
+    own slab land (SPEEDY's default) reads it as the climatology its anomaly
+    is added to, so the land the fluxes see would be the component's
+    temperature plus a second slab's response to the same flux. Which of the
+    two lands runs is therefore one choice made in two places, and this is
+    where they are held together.
     """
     if not isinstance(components, Mapping):
         return
-    if not any(spec.src == ATMOSPHERE_LAND_EVAPORATION for spec in specs):
-        return
-    if getattr(components.get("atm"), "publishes_land_evaporation", True):
-        return
-    raise ValueError(
-        "The land component takes the atmosphere's evaporation over the land "
-        f"part of each cell ({ATMOSPHERE_LAND_EVAPORATION}), but the "
-        "atmosphere's physics publishes no land flux tile -- ECHAM delivers its "
-        "fluxes untiled -- so the soil would be charged with the grid-cell "
-        "mean, the sea's evaporation included. Couple a land to SPEEDY "
-        "physics, or leave land=none."
-    )
+    atmosphere = components.get("atm")
+    if not getattr(atmosphere, "publishes_land_evaporation", True):
+        raise ValueError(
+            "The land component takes the atmosphere's fluxes over the land "
+            f"part of each cell ({ATMOSPHERE_LAND_EVAPORATION}, and "
+            f"{ATMOSPHERE_LAND_HEAT_FLUX} for a land with a temperature), but "
+            "the atmosphere's physics publishes no land flux tile -- ECHAM "
+            "delivers its fluxes untiled -- so the land would be charged with "
+            "the grid-cell mean, the sea's share included. Couple a land to "
+            "SPEEDY physics, or leave land=none."
+        )
+    if _is_slab_land(components) and getattr(
+            atmosphere, "integrates_land_temperature", False):
+        raise ValueError(
+            "Two lands would integrate the land temperature: the land "
+            f"component {type(components['lnd']).__name__} evolves it and hands "
+            "it to the atmosphere as stl_am, and the atmosphere's own physics "
+            "evolves a slab land on top of stl_am as well. Choose one. For the "
+            "component, build the atmosphere with its land prescribed -- "
+            "jcm.physics.speedy.speedy_terms.speedy_physics(land_model="
+            "\"prescribed\") in Python; land=slab does it on the command line "
+            "(atmosphere.physics.terms.speedy_surface_flux.land_model="
+            "prescribed). For the atmosphere's own land, leave land=none, or "
+            "land=bucket to evolve only its soil water."
+        )
+
+
+def land_temperature_source(
+    components: Mapping[str, Component] | Iterable[str],
+) -> str:
+    """Say, in a phrase, what the land's temperature is in this coupled model.
+
+    The answer depends on two things chosen in different places -- whether a
+    land component that evolves a temperature is present, and whether the
+    atmosphere's own physics integrates a land -- so it is stated in one
+    place, for a log line or a notebook, rather than left to be worked out.
+    A stand-in atmosphere that cannot be asked counts as having no land of
+    its own.
+    """
+    if not isinstance(components, Mapping):
+        return "unknown (component names only)"
+    atmosphere = components.get("atm")
+    own = getattr(atmosphere, "integrates_land_temperature", False)
+    if _is_slab_land(components):
+        land = type(components["lnd"]).__name__
+        if own:
+            return (f"evolved twice, by the land component ({land}) and by the "
+                    "atmosphere's own land -- a pairing the standard coupling refuses")
+        return (f"evolved by the land component ({land}); the atmosphere's own "
+                "land is prescribed and reads it")
+    if own:
+        return "evolved by the atmosphere's own land, inside its physics"
+    return ("prescribed: the atmosphere's boundary condition, which neither "
+            "its physics nor a land component evolves")
 
 
 #: Where a clamping ocean publishes the deficit its clamp removed.
@@ -1059,18 +1404,17 @@ def _check_freezing_deficit_is_taken(
     """
     if not isinstance(components, Mapping) or "ocn" not in components:
         return
-    params = getattr(components["ocn"], "params", None)
-    if not getattr(params, "clamp_at_freezing", False):
+    if not _ocean_clamps_at_freezing(components["ocn"]):
         return
     if any(spec.src == FREEZING_DEFICIT for spec in specs):
         return
     raise ValueError(
-        "The ocean clamps its mixed layer at the freezing point "
-        "(params.clamp_at_freezing=True), but no exchange takes the deficit "
+        "The ocean clamps its top layer at the freezing point "
+        "(clamp_at_freezing=True), but no exchange takes the deficit "
         f"the clamp removes ({FREEZING_DEFICIT}), so the clamp would create "
         "heat. Couple a sea ice that forms ice from it, or construct the "
         "ocean with clamp_at_freezing=False, which keeps the deficit in the "
-        "mixed layer (the choice for SlabSeaiceModel)."
+        "ocean (the choice for SlabSeaiceModel)."
     )
 
 
@@ -1083,41 +1427,55 @@ def _is_winton(components: Mapping[str, Component] | Iterable[str]) -> bool:
         components.get("seaice"), module.WintonSeaiceModel)
 
 
-def _check_winton_coupling(
+def check_winton_coupling(
     components: Mapping[str, Component] | Iterable[str],
 ) -> None:
-    """Refuse a Winton sea ice the table cannot couple faithfully.
+    """Refuse a Winton sea ice that cannot be coupled faithfully.
+
+    One rule for every exchange that carries a Winton ice: the standard
+    table (:func:`default_exchanges`) and :class:`jem.fluxes.VerosExchange`
+    both call it.
 
     The ice forms frazil from the deficit an ocean's clamp at freezing removes
-    and passes the ocean everything the ocean receives, so its ocean has to be
-    a clamping slab ocean: an ocean that kept the deficit would freeze it a
-    second time, and Veros neither clamps nor publishes it. Its forcing is the
+    and passes the ocean everything the ocean receives, so its ocean has to
+    clamp, slab or Veros alike (``params.clamp_at_freezing`` /
+    ``VerosComponent(clamp_at_freezing=True)``): an ocean that kept the
+    deficit would have it frozen a second time. Its forcing is the
     atmosphere's flux over the sea part of each cell, so the atmosphere has to
     publish its sea tile: ECHAM delivers its fluxes untiled and integrates its
     own sea ice.
     """
     if not _is_winton(components):
         return
-    assert isinstance(components, Mapping)
+    if not isinstance(components, Mapping):
+        # Unreachable from `default_exchanges` (`_is_winton` is False for
+        # anything but a mapping); a real error so that a direct caller still
+        # gets one when assertions are stripped.
+        raise TypeError(
+            "A Winton sea ice is recognised only among components passed as a "
+            f"mapping, not a {type(components).__name__}."
+        )
     ocean = components.get("ocn")
-    if ocean is not None:
+    if ocean is not None and not _ocean_clamps_at_freezing(ocean):
         if _is_veros_ocean(ocean):
-            raise ValueError(
-                "A Winton sea ice cannot be coupled to the Veros ocean yet: "
-                "Veros neither clamps its top cell at the freezing point nor "
-                "publishes the deficit the ice forms frazil from "
-                "(jax-esm#160). Couple it to a slab ocean "
-                "(ocean=slab*), or use seaice=slab."
+            fix = (
+                "Construct the ocean with VerosComponent(model, "
+                "clamp_at_freezing=True) (+ocean.clamp_at_freezing=true)."
             )
-        if not getattr(getattr(ocean, "params", None), "clamp_at_freezing", False):
-            raise ValueError(
-                "A Winton sea ice forms frazil ice from the deficit the ocean "
-                "removes by clamping its mixed layer at the freezing point, but "
-                "this ocean keeps the deficit (params.clamp_at_freezing=False), "
-                "so freezing would be counted twice. Construct the ocean with "
-                "SlabOceanParameters(clamp_at_freezing=True) "
-                "(+ocean.params.clamp_at_freezing=true)."
+            what = "clamping its top cell at the freezing point"
+            flag = "clamp_at_freezing=False"
+        else:
+            fix = (
+                "Construct the ocean with SlabOceanParameters("
+                "clamp_at_freezing=True) (+ocean.params.clamp_at_freezing=true)."
             )
+            what = "clamping its mixed layer at the freezing point"
+            flag = "params.clamp_at_freezing=False"
+        raise ValueError(
+            "A Winton sea ice forms frazil ice from the deficit the ocean "
+            f"removes by {what}, but this ocean keeps the deficit ({flag}), "
+            f"so freezing would be counted twice. {fix}"
+        )
     atmosphere = components.get("atm")
     if atmosphere is not None and not getattr(atmosphere, "publishes_sea_tiles", True):
         raise ValueError(
@@ -1135,6 +1493,18 @@ def _is_veros_ocean(ocean: Any) -> bool:
     return module is not None and isinstance(ocean, module.VerosComponent)
 
 
+def _ocean_clamps_at_freezing(ocean: Any) -> bool:
+    """Whether an ocean holds itself at freezing and publishes the deficit.
+
+    A slab ocean says so in its (differentiable-parameter) ``params``; the
+    Veros wrapper, which has no parameters pytree, in its static
+    ``clamp_at_freezing`` attribute.
+    """
+    if _is_veros_ocean(ocean):
+        return bool(getattr(ocean, "clamp_at_freezing", False))
+    return bool(getattr(getattr(ocean, "params", None), "clamp_at_freezing", False))
+
+
 def _exchange_table(
     components: Mapping[str, Component] | Iterable[str],
 ) -> tuple[tuple[str, str, str], ...]:
@@ -1144,26 +1514,49 @@ def _exchange_table(
     :class:`~jem.components.veros_component.VerosComponent`, and
     :data:`STANDARD_EXCHANGES` otherwise -- including when the caller passed
     names rather than components, since a name says nothing about a carry.
-    With a Winton sea ice, the slab table's ocean heat-flux row is replaced
-    by :data:`WINTON_SEAICE_EXCHANGES` (:func:`_check_winton_coupling`
-    refuses the Veros case).
+    With a Winton sea ice the ocean's heat-flux row is replaced by
+    :data:`WINTON_SEAICE_EXCHANGES`' (the slab table) or, over Veros, the
+    heat and freshwater rows by :data:`VEROS_WINTON_SEAICE_EXCHANGES`'
+    (:func:`check_winton_coupling` refuses an ocean that does not clamp).
+    With a :class:`~jem.components.slab.slab_land_model.SlabLandModel` either
+    table gains :data:`SLAB_LAND_EXCHANGES`.
     """
-    if _is_winton(components):
-        return tuple(
-            row for row in STANDARD_EXCHANGES if row[:2] != WINTON_REPLACES
-        ) + WINTON_SEAICE_EXCHANGES
-    if not isinstance(components, Mapping):
+    rows = _ocean_and_seaice_table(components)
+    if _is_slab_land(components):
+        return rows + SLAB_LAND_EXCHANGES
+    return rows
+
+
+def _ocean_and_seaice_table(
+    components: Mapping[str, Component] | Iterable[str],
+) -> tuple[tuple[str, str, str], ...]:
+    """Return the table the ocean and the sea ice select; see :func:`_exchange_table`."""
+    winton = _is_winton(components)
+    ocean = components.get("ocn") if isinstance(components, Mapping) else None
+    if not _is_veros_ocean(ocean):
+        if winton:
+            return tuple(
+                row for row in STANDARD_EXCHANGES if row[:2] != WINTON_REPLACES
+            ) + WINTON_SEAICE_EXCHANGES
         return STANDARD_EXCHANGES
-    ocean = components.get("ocn")
-    # `sys.modules`, not an import: see VEROS_COMPONENT_MODULE.
-    module = sys.modules.get(VEROS_COMPONENT_MODULE)
-    if ocean is None or module is None:
-        return STANDARD_EXCHANGES
-    if not isinstance(ocean, module.VerosComponent):
-        return STANDARD_EXCHANGES
-    logger.debug(
-        "The ocean is a Veros GCM, so the default coupling is the Veros table."
+    logger.warning(
+        "The ocean is a Veros GCM and no exchanger was named, so the default "
+        "coupling is VEROS_OCEAN_EXCHANGES, which only copies fields: the "
+        "ocean gets the heat and freshwater fluxes but NO wind stress (it has "
+        "to be rotated onto the ocean grid, which a copy cannot do) and no "
+        "sea-ice mask on its fluxes, i.e. it is thermodynamically forced only. "
+        "Name jem.fluxes.VerosExchange as the exchanger -- "
+        "+coupling.exchanger._target_=jem.fluxes.VerosExchange on the command "
+        "line -- for a mechanically forced ocean."
     )
+    if winton:
+        # The ice's rows replace the ones that would hand the ocean the
+        # atmosphere's heat and freshwater fluxes; the others stay.
+        replaced = set(VEROS_WINTON_REPLACES)
+        kept = tuple(row for row in VEROS_OCEAN_EXCHANGES
+                     if row[:2] not in replaced)
+        return kept + tuple(
+            row for row in VEROS_WINTON_SEAICE_EXCHANGES if row not in kept)
     return VEROS_OCEAN_EXCHANGES
 
 
@@ -1360,7 +1753,7 @@ def read_field(carry: CoupledCarry | dict[str, Carry], path: str) -> Any:
         The coupled carry, or a mapping of component carries.
     path : str
         ``"component.section.field"``, with ``section`` one of
-        :data:`SECTIONS`.
+        ``SECTIONS``.
 
     Returns
     -------
@@ -1405,12 +1798,12 @@ def replace_field(
 ) -> CoupledCarry | dict[str, Carry]:
     """Return a coupled carry with one ``"component.section.field"`` replaced.
 
-    Every example that customises one initial condition -- a bumped initial
-    sea surface temperature, an SST an ``jax.jvp`` differentiates -- had to
-    rebuild three nested containers by hand to change a single field
+    Customising one initial condition -- a bumped initial sea surface
+    temperature, an SST a ``jax.jvp`` differentiates -- means rebuilding three
+    nested containers to change a single field
     (``dict(carry, components=dict(carry.components, ocn=dict(ocean_carry,
-    state=ocean_carry["state"].replace(...))))``), and every example did it
-    slightly differently. This is that rebuild, written once against the
+    state=ocean_carry["state"].replace(...))))``), which each caller would
+    write slightly differently. This is that rebuild, written once against the
     ``"component.section.field"`` vocabulary :class:`Exchange` already uses,
     so a notebook or a driver names the field it wants changed rather than the
     nested containers around it.
@@ -1423,8 +1816,8 @@ def replace_field(
     :class:`~jem.base.component.CoupledCarry` or the bare ``dict[str, Carry]``
     mapping an exchanger is handed, and the return is the same kind: a
     ``CoupledCarry`` is rebuilt with ``dataclasses.replace(carry,
-    components=...)`` so that a field added to it later (there is only
-    ``components`` and ``step`` today) is carried through unchanged, and a
+    components=...)`` so that a field added to it later (it has
+    ``components``, ``step`` and ``time``) is carried through unchanged, and a
     bare mapping is returned as a new mapping.
 
     Parameters
@@ -1434,7 +1827,7 @@ def replace_field(
         replacement from.
     path : str
         ``"component.section.field"``, with ``section`` one of
-        :data:`SECTIONS`.
+        ``SECTIONS``.
     value : Any
         The new value for the field. Its pytree structure, and every leaf's
         shape and dtype, must match the field it replaces exactly --

@@ -1,6 +1,6 @@
 """The component contract and the coupled-model state types.
 
-This module is the whole of the interface between the :class:`Coupler` and
+This module is the whole of the interface between the :class:`~jem.base.coupler.Coupler` and
 the things it couples. It is deliberately small:
 
 - :class:`Component` is a :class:`typing.Protocol`: a component is any object
@@ -26,10 +26,9 @@ the things it couples. It is deliberately small:
   simply copying a field. It is the *only* place where one component's carry
   is read by another.
 
-The design is recorded in ``docs/source/design/carry_and_clock.md`` and, for
-the task numbering (T1.1, T1.3), in the API hardening plan, which lives on
-the review branch rather than in this repository:
-https://github.com/climate-analytics-lab/jax-esm/blob/claude/jax-esm-api-review-jv7j7u/docs/source/design/api_hardening_plan.md
+The design is recorded in ``docs/source/design/carry_and_clock.md`` (the
+carry layout, the clock and the component contract) and
+``docs/source/design/exchange.md`` (the exchangers).
 """
 
 from __future__ import annotations
@@ -44,7 +43,6 @@ import jax_datetime as jdt
 import numpy as np
 import xarray as xr
 from flax import struct
-from jcm.date import fraction_of_year_elapsed
 
 # A component's carry is an arbitrary pytree; by convention the slab models
 # and the JCM wrapper use a dict with "state", "forcing" and "derived" keys
@@ -108,8 +106,9 @@ def forcing_variable(name: str) -> str:
 #: carry an output variable came from. See :func:`role_attrs`.
 ROLE_ATTRIBUTE = "jem_role"
 
-#: What a variable's role may be: the three sections of the carry layout the
-#: packaged components share (``jem.exchangers`` addresses fields by them).
+#: The role an output variable may have, one of the three sections of the carry
+#: layout the packaged components share (``jem.exchangers`` addresses fields by
+#: them).
 Role = Literal["state", "derived", "forcing"]
 
 #: The roles, as a tuple, for validation and for iterating in a test.
@@ -151,8 +150,9 @@ def role_attrs(role: Role) -> dict[str, str]:
 
     Parameters
     ----------
-    role : {"state", "derived", "forcing"}
-        Which section of the carry the variable was read from.
+    role : str
+        Which section of the carry the variable was read from: ``"state"``,
+        ``"derived"`` or ``"forcing"``.
 
     Returns
     -------
@@ -221,6 +221,12 @@ class CouplingTime:
         the function the atmosphere's own seasonal physics uses -- so a
         component's seasonal cycle and JCM's agree by construction.
         """
+        # Imported here rather than at module scope: `jcm.date` lives in the
+        # `jcm` package, whose `__init__` imports the whole atmosphere, and
+        # `import jem` is meant not to. The import is cached after the first
+        # call, so a traced step pays for it once, at trace time.
+        from jcm.date import fraction_of_year_elapsed
+
         return cast(jax.Array, fraction_of_year_elapsed(self.time))
 
 
@@ -347,7 +353,15 @@ class SupportsXarray(Protocol):
 
 @runtime_checkable
 class SupportsCheckpoint(Protocol):
-    """Optional: components whose carry is not a plain pytree of arrays (Veros)."""
+    """Optional: components whose carry is not a plain pytree of arrays (Veros).
+
+    ``save_carry`` writes everything into the ``directory`` it is handed and
+    ``load_carry`` reads it back from the one it is handed. The two are not
+    the same path: a coupled checkpoint is written into a staging directory
+    and renamed into place only once it is complete
+    (:func:`jem.checkpoint.save_coupled_carry`), so a component must not
+    record the path it saved to and expect to find its files there later.
+    """
 
     def save_carry(self, carry: Carry, directory: Path) -> None: ...
 

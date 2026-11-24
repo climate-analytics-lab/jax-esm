@@ -78,6 +78,10 @@ datasets = coupler.to_xarray(diagnostics)
 | {doc}`running` | `run_chunked`: chunking, the health gate, checkpointing and resume, output files, in-scan reductions |
 | {doc}`configuration` | The Hydra config groups, jax-gcm's groups re-rooted under `atmosphere`, the wiring-only rule |
 | {doc}`jcm_adapter` | The pinned jax-gcm revision and integration points; `JCMComponent`, the surface-exchange reader |
+| {doc}`bucket_land` | `BucketLandModel`: the soil-water bucket under the atmosphere's own land, its budget and its drainage tuning |
+| {doc}`slab_land` | `SlabLandModel`: JEM's own land (temperature, snow, soil water, vegetation, albedo), the choice between it and the atmosphere's built-in land, and how it is coupled |
+| {doc}`winton_seaice` | `WintonSeaiceModel`: the thermodynamic snow-and-ice model, its energy budget, optional ice transport, and how it is coupled |
+| {doc}`differentiating_long_runs` | `jem.adjoint`: gradients of long, high-resolution runs, and the Veros adjoint's known gaps |
 
 ## Adding a new component
 
@@ -96,7 +100,9 @@ around `JCMComponent`); the same shape applies to any model.
    `initialize(params=None)` signature the slab models have (see
    {doc}`carry_and_clock`'s *Parameters* section).
 3. Add `bind(...)` if the model has an internal timestep, and raise
-   `ValueError` when the coupling timestep does not divide it. Add
+   `ValueError` when the model's timestep does not divide the coupling
+   timestep (the component takes a whole number of its own steps per coupled
+   step). Add
    `to_xarray(diagnostics, time)` if it produces output, and
    `save_carry`/`load_carry` if its carry cannot be checkpointed as a plain
    pytree.

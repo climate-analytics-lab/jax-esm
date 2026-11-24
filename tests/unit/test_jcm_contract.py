@@ -10,6 +10,7 @@ rather than on the class.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import importlib
 import importlib.resources
@@ -65,8 +66,24 @@ def _resolve(target: str):
 #: so ``hasattr(cls, name)`` is not the right question to ask. Each entry maps
 #: a contract ``target`` to a callable returning a representative instance;
 #: nothing is read off these instances beyond whether the attribute exists.
+def _tte_tke_term():
+    """Build ECHAM's vertical-diffusion term with its defaults."""
+    from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion import (
+        TteTkeVerticalDiffusion,
+    )
+
+    return TteTkeVerticalDiffusion()
+
+
 _INSTANCE_FACTORIES = {
     "jcm.model.Model": lambda model: model,
+    "jcm.physics.composable_physics.ComposablePhysics": lambda model: model.physics,
+    # The terms' ``land_model`` is set by ``__init__``; a default-built term
+    # of each class is the faithful probe.
+    "jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux": lambda model: next(
+        t for t in model.physics.terms if type(t).__name__ == "SpeedySurfaceFlux"),
+    "jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion."
+    "TteTkeVerticalDiffusion": lambda model: _tte_tke_term(),
     # ``ModelPredictions.__init__`` only stores what it is handed, and the
     # contract cares about the names it stores under -- so an empty one is a
     # faithful probe and costs nothing.
@@ -80,6 +97,13 @@ def _has_attribute(point: IntegrationPoint, model: Model) -> bool:
     """Report whether the name in ``point`` still exists on the installed jcm."""
     owner = _resolve(point.target)
     if hasattr(owner, point.attribute):
+        return True
+    # A dataclass field without a default (``RunState.dynamics``,
+    # ``ForcingData.sea_surface_temperature``) is not an attribute of the
+    # class, but it is what the adapter reads off an instance.
+    if dataclasses.is_dataclass(owner) and point.attribute in {
+        f.name for f in dataclasses.fields(owner)
+    }:
         return True
     factory = _INSTANCE_FACTORIES.get(point.target)
     return factory is not None and hasattr(factory(model), point.attribute)
@@ -169,6 +193,125 @@ def test_jcm_package_data_still_shipped(point: IntegrationPoint):
     assert resource.is_file() or resource.is_dir(), _missing(point)
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _jcm_imports() -> dict[tuple[str, bool], list[str]]:
+    """Return every jax-gcm name ``jem/`` imports, as ``(name, is_module) -> locations``.
+
+    Parses the source of every ``.py`` file under ``jem/`` and records
+
+    * ``import jcm.x.y`` / ``import jcm.x.y as z`` as the module ``jcm.x.y``;
+    * ``from jcm.x import a, b`` as the names ``jcm.x.a`` and ``jcm.x.b``;
+    * ``alias.attr`` where ``alias`` is a name bound by an
+      ``import jcm.x as alias`` statement, as the name ``jcm.x.attr`` (dunder
+      attributes such as ``jcm.__file__`` are skipped).
+
+    Nothing is imported, so the result cannot depend on import side effects or
+    on which optional dependency is installed. What it does not see: a
+    ``jcm`` name reached through a *value* rather than an import -- an
+    attribute of an object a jax-gcm function returned (``model.dt_si``, the
+    constants read off ``jcm.constants.physical_constants``), a name built as
+    a string for ``importlib``, or one named in a YAML config. Those are listed
+    in the contract by hand, so this check is a floor under the contract, not
+    the whole of it.
+    """
+    found: dict[tuple[str, bool], list[str]] = {}
+    for path in sorted((REPO_ROOT / "jem").rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        where = path.relative_to(REPO_ROOT)
+        module_aliases: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "jcm" or alias.name.startswith("jcm."):
+                        found.setdefault((alias.name, True), []).append(f"{where}:{node.lineno}")
+                        if alias.asname:
+                            module_aliases[alias.asname] = alias.name
+            elif (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 0
+                and node.module is not None
+                and (node.module == "jcm" or node.module.startswith("jcm."))
+            ):
+                for alias in node.names:
+                    found.setdefault((f"{node.module}.{alias.name}", False), []).append(
+                        f"{where}:{node.lineno}"
+                    )
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in module_aliases
+                and not node.attr.startswith("__")
+            ):
+                dotted = f"{module_aliases[node.value.id]}.{node.attr}"
+                found.setdefault((dotted, False), []).append(f"{where}:{node.lineno}")
+    return found
+
+
+def _covered_by_an_integration_point(dotted: str, is_module: bool) -> bool:
+    """Report whether some entry of the contract accounts for ``dotted``.
+
+    An imported *name* (``from jcm.model import Model``, ``c.p0``) must be
+    exactly the ``target.attribute`` of an entry. An imported *module*
+    (``import jcm.constants as c``) names no attribute itself, so it is
+    covered when it is the ``target`` of an entry or a dotted prefix of one:
+    the entries for the attributes read off it are what accounts for it.
+    """
+    for point in JCM_INTEGRATION_POINTS:
+        if dotted == f"{point.target}.{point.attribute}":
+            return True
+        if is_module and (
+            dotted == point.target or point.target.startswith(dotted + ".")
+        ):
+            return True
+    return False
+
+
+def test_every_jcm_import_under_jem_is_an_integration_point():
+    """Check no jax-gcm name ``jem/`` imports is missing from the contract.
+
+    The contract is only worth its name if it cannot rot: a name imported at
+    module scope (the Winton ice's ``jcm.physics.speedy.params``) breaks
+    ``import jem.components`` when jax-gcm renames it, and the per-entry tests
+    above can only check the names somebody remembered to list. This reads the
+    imports from the source (see :func:`_jcm_imports` for what that does not
+    see) and fails naming each one no entry covers and where it is imported.
+    """
+    uncovered = {
+        dotted: places
+        for (dotted, is_module), places in _jcm_imports().items()
+        if not _covered_by_an_integration_point(dotted, is_module)
+    }
+    listing = "; ".join(
+        f"{name} (imported at {', '.join(places[:3])})"
+        for name, places in sorted(uncovered.items())
+    )
+    assert not uncovered, (
+        "jem/ imports these jax-gcm names, which no entry of"
+        " JCM_INTEGRATION_POINTS (jem/components/jcm/contract.py) covers, so a"
+        f" rename on the jax-gcm side would not be reported by name: {listing}."
+        " Add an entry saying what each is used for."
+    )
+
+
+def test_the_jcm_import_scan_is_not_vacuous():
+    """Check the import scan finds jax-gcm names at all.
+
+    An empty scan (a moved source tree, a changed import style) would make the
+    coverage test above pass for nothing.
+    """
+    found = {dotted for dotted, _ in _jcm_imports()}
+    for expected in (
+        "jcm.model.Model",
+        "jcm.physics.speedy.params.SurfaceFluxParameters",
+        "jcm.constants.p0",
+        "jcm.constants",
+    ):
+        assert expected in found, f"The import scan no longer finds {expected}."
+
+
 def test_workflow_pins_the_supported_revision():
     """Check CI checks out exactly the revision the contract says is supported.
 
@@ -191,6 +334,68 @@ def test_workflow_pins_the_supported_revision():
         " jem/components/jcm/contract.py says JAX-ESM is supported against"
         f" {JCM_SUPPORTED_REV}. Bump both, or CI is not testing what the"
         " contract claims."
+    )
+
+
+def test_the_dockerfile_installs_the_supported_revision():
+    """Check the image is built against the revision the contract supports.
+
+    The Dockerfile clones jax-gcm at a sha of its own, and an image built at
+    another one installs cleanly -- the version floor is satisfied -- and then
+    fails on `import jem.components`, which is the image's entry point.
+    """
+    dockerfile = WORKFLOW.parents[2] / "Dockerfile"
+    match = re.search(r"^ARG JCM_REV=(\S+)\s*$", dockerfile.read_text(), re.MULTILINE)
+    assert match is not None, f"No `ARG JCM_REV=` in {dockerfile}"
+    assert match.group(1) == JCM_SUPPORTED_REV, (
+        f"{dockerfile.name} builds against jax-gcm {match.group(1)} but"
+        " jem/components/jcm/contract.py says JAX-ESM is supported against"
+        f" {JCM_SUPPORTED_REV}. Bump it with the pin."
+    )
+
+
+def test_the_readthedocs_build_installs_the_supported_revision():
+    """Check the hosted docs are built against the revision the contract supports.
+
+    Read the Docs cannot `pip install` the project (the `jcm` floor is not on
+    PyPI), so `.readthedocs.yaml` installs jax-gcm from git at a sha of its
+    own. A docs build at another one succeeds on install and then renders the
+    API pages of an adapter that does not match the atmosphere it documents.
+    """
+    config = WORKFLOW.parents[2] / ".readthedocs.yaml"
+    shas = re.findall(
+        r"git\+https://github\.com/climate-analytics-lab/jax-gcm@([0-9a-f]+)",
+        config.read_text(),
+    )
+    assert shas, f"No `git+https://github.com/climate-analytics-lab/jax-gcm@<sha>` in {config}"
+    assert set(shas) == {JCM_SUPPORTED_REV}, (
+        f"{config.name} installs jax-gcm {sorted(set(shas))} but"
+        " jem/components/jcm/contract.py says JAX-ESM is supported against"
+        f" {JCM_SUPPORTED_REV}. Bump it with the pin."
+    )
+
+
+def test_the_jcm_floor_is_the_supported_version():
+    """Check `pip` cannot resolve `jcm` to a release older than the contract's.
+
+    The requirement's floor is what `pip install jax-esm` resolves against.
+    One lower than the version jax-gcm reports at the supported revision
+    admits older releases from PyPI, and those install without complaint and
+    then fail on import: jcm 3.0.0 lacks names the adapter imports at module
+    scope.
+    """
+    import tomllib
+
+    pyproject = tomllib.loads((WORKFLOW.parents[2] / "pyproject.toml").read_text())
+    requirements = [
+        requirement
+        for requirement in pyproject["project"]["dependencies"]
+        if re.match(r"jcm\b", requirement)
+    ]
+    assert requirements == [f"jcm>={JCM_SUPPORTED_VERSION}"], (
+        f"pyproject.toml requires {requirements}, but the supported jax-gcm"
+        f" revision reports {JCM_SUPPORTED_VERSION}: the floor must be that"
+        " version, so that no older jcm release satisfies it."
     )
 
 
@@ -254,8 +459,14 @@ def test_installed_jcm_matches_contract():
     """
     installed = getattr(jcm, "__version__", None)
     assert installed == JCM_SUPPORTED_VERSION, (
-        f"The imported jcm reports {installed} but JAX-ESM is supported"
-        f" against {JCM_SUPPORTED_VERSION} ({JCM_SUPPORTED_REV}); None means"
-        " this jcm defines no `__version__` at all. Check out that revision,"
-        " or update jem/components/jcm/contract.py if the move is deliberate."
+        f"The imported jcm ({getattr(jcm, '__file__', 'unknown location')})"
+        f" reports version {installed}, but JAX-ESM needs jax-gcm"
+        f" {JCM_SUPPORTED_VERSION} at revision {JCM_SUPPORTED_REV}. (None"
+        " means this jcm defines no `__version__` at all.) The `jcm` on PyPI"
+        " is 3.0.0 and cannot run JAX-ESM: install jax-gcm from source at the"
+        " pinned revision instead:\n"
+        "  git clone https://github.com/climate-analytics-lab/jax-gcm\n"
+        f"  cd jax-gcm && git checkout {JCM_SUPPORTED_REV} && pip install -e ."
+        "\nIf the move to another jax-gcm is deliberate, update"
+        " jem/components/jcm/contract.py (see 'How to bump the pin')."
     )

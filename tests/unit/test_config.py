@@ -16,6 +16,7 @@ wrong without anyone noticing:
 
 import importlib
 import inspect
+import os
 import re
 import shutil
 import subprocess
@@ -69,6 +70,17 @@ def _group_override(group: str, option: str) -> str:
     of them -- there is no package to carry.
     """
     return f"{group}={option}"
+
+
+#: Options that compose only beside something else, with what they need. The
+#: slab land reads the atmosphere's own boundary file
+#: (``${atmosphere.forcing.file}``), which the default aquaplanet does not have.
+OPTION_NEEDS = {("land", "slab"): ["+configuration=earth-slab"]}
+
+
+def _option_overrides(group: str, option: str) -> list[str]:
+    """Return the overrides under which ``option`` of ``group`` composes."""
+    return [*OPTION_NEEDS.get((group, option), []), _group_override(group, option)]
 
 
 def _atmosphere_groups() -> dict[str, str]:
@@ -142,10 +154,13 @@ def test_none_option_composes_to_none(group):
 def test_named_configuration_composes(name):
     """Every named coupled configuration composes, and sets something."""
     cfg = composed([f"+configuration={name}"])
-    assert cfg.atmosphere.grid.spectral_truncation == 31
+    # SPEEDY's T31 everywhere but the ECHAM configurations, which run
+    # jax-gcm's T63 `t63-echam-1m` atmosphere.
+    expected_truncation = 63 if name.endswith("-echam") else 31
+    assert cfg.atmosphere.grid.spectral_truncation == expected_truncation
     # A configuration that composed but selected nothing would pass every
-    # other check in this file; the ocean is the one component all five
-    # configure.
+    # other check in this file; the ocean is the one component every one of
+    # them configures.
     assert cfg.ocean is not None
 
 
@@ -252,6 +267,77 @@ def test_run_options_share_one_schema():
     assert len(set(map(frozenset, key_sets.values()))) == 1, key_sets
 
 
+#: `run_chunked` arguments that have no key in `coupled_run`: the coupler is
+#: the thing being run, and the other three are live Python objects no YAML
+#: can name (`default.yaml` says so).
+NOT_CONFIGURABLE_RUN_ARGUMENTS = frozenset(
+    {"coupler", "health_check", "accumulate", "initial_carry"}
+)
+
+
+def _run_chunked_defaults() -> dict:
+    """Return ``run_chunked``'s keyword arguments and their defaults."""
+    from jem.driver import run_chunked
+
+    return {
+        name: parameter.default
+        for name, parameter in inspect.signature(run_chunked).parameters.items()
+        if parameter.default is not inspect.Parameter.empty
+    }
+
+
+@pytest.mark.parametrize("option", _options("coupled_run"))
+def test_run_options_repeat_no_run_chunked_default(option):
+    """No ``coupled_run`` literal equals the ``run_chunked`` default it shadows.
+
+    The defaults live on ``run_chunked``'s signature; a YAML key that wants
+    one says ``${run_default:<keyword>}``. A literal equal to the default is a
+    second copy that drifts silently, so it is refused whether it is an
+    option file's own or one inherited from ``default.yaml``.
+    """
+    raw = OmegaConf.load(CONFIG_DIR / "coupled_run" / f"{option}.yaml")
+    defaults = _run_chunked_defaults()
+    for key in raw:
+        if key == "defaults" or OmegaConf.is_interpolation(raw, key):
+            continue
+        if key in defaults:
+            assert raw[key] != defaults[key] or type(raw[key]) is not type(defaults[key]), (
+                f"coupled_run/{option}.yaml: {key} = {raw[key]!r} repeats "
+                f"run_chunked's default; write `${{run_default:{key}}}` (or, if "
+                "the option means to inherit it, delete the key)."
+            )
+
+
+def test_run_options_cover_every_configurable_run_chunked_keyword():
+    """Every ``run_chunked`` keyword that a YAML can express is a schema key."""
+    from jem.driver import run_chunked
+
+    keywords = set(inspect.signature(run_chunked).parameters) - NOT_CONFIGURABLE_RUN_ARGUMENTS
+    schema = set(composed([]).coupled_run)
+    assert keywords <= schema, f"no coupled_run key for: {sorted(keywords - schema)}"
+    # `log_level` is the one key that is not a run_chunked argument.
+    assert schema - keywords == {"log_level"}
+
+
+def test_resolved_run_defaults_are_run_chunked_s():
+    """The resolver hands the command line exactly ``run_chunked``'s defaults."""
+    resolved = OmegaConf.to_container(composed([]).coupled_run, resolve=True)
+    defaults = _run_chunked_defaults()
+    for key, value in resolved.items():
+        # The two literals this file chooses for the command line.
+        if key in defaults and key not in ("total_time", "output_dir"):
+            assert value == defaults[key], key
+    # An override still replaces the interpolation, with no leading `+`.
+    cfg = composed(["coupled_run.chunk=10 days"])
+    assert cfg.coupled_run.chunk == "10 days"
+
+
+def test_run_default_resolver_refuses_an_unknown_keyword():
+    cfg = OmegaConf.create({"x": "${run_default:not_a_keyword}"})
+    with pytest.raises(Exception, match="not_a_keyword"):
+        cfg.x
+
+
 def test_end_time_composes_and_nulls_total_time():
     """``coupled_run.end_time`` is a schema key, so it overrides without a ``+``."""
     cfg = composed([
@@ -279,7 +365,7 @@ def _supplied_kwargs(node: DictConfig) -> dict:
 @pytest.mark.parametrize(
     "overrides",
     [[]]
-    + [[_group_override(g, o)] for g in _groups() if g != "configuration"
+    + [_option_overrides(g, o) for g in _groups() if g != "configuration"
        for o in _options(g)]
     + [[f"+configuration={name}"] for name in _options("configuration")],
     ids=lambda ov: "+".join(ov) or "defaults",
@@ -293,8 +379,15 @@ def test_config_has_no_python_defaults(overrides):
     default *and* is what the named option is about.
     """
     cfg = composed(overrides)
-    # The atmosphere is JAX-GCM's own config, tested in JAX-GCM.
-    coupled = {key: cfg[key] for key in cfg if key != "atmosphere"}
+    # The atmosphere is JAX-GCM's own config, tested in JAX-GCM. Each other
+    # node is resolved while the atmosphere is still beside it: a surface
+    # component may name one of the atmosphere's files by interpolation
+    # (`sst_clim_file: ${atmosphere.forcing.file}`).
+    coupled = {
+        key: OmegaConf.to_container(cfg[key], resolve=True)
+        if OmegaConf.is_config(cfg[key]) else cfg[key]
+        for key in cfg if key != "atmosphere"
+    }
     nodes = 0
     for path, node in _target_nodes(OmegaConf.create(coupled)):
         try:
@@ -335,6 +428,26 @@ def test_named_configurations_set_non_default_values():
     assert earth.ocean.params.relaxation_time == 30 * 86400
     # The land is the atmosphere's own (SPEEDY's slab): no land component.
     assert earth.land is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["aquaplanet-slab", "aquaplanet-slab-mixed-grid", "earth-slab", "earth-slab-winton"],
+)
+def test_slab_configurations_take_the_atmosphere_step_from_the_bundle(name):
+    """A slab configuration's step is the one jax-gcm's calibration was made at.
+
+    The configuration states no step of its own: it composes the ``speedy-t31``
+    bundle, whose ``run.time_step`` is the step its parameters were fitted at,
+    and the value is read off that file rather than restated here.
+    ``tests/unit/test_slab_calibrated_atmosphere.py`` checks the rest of what
+    the bundle brings.
+    """
+    bundle = OmegaConf.load(JCM_CONFIG_DIR / "configuration" / "speedy-t31.yaml")
+    if name != "earth-slab-winton":
+        raw = OmegaConf.load(CONFIG_DIR / "configuration" / f"{name}.yaml")
+        assert "run" not in raw.get("atmosphere", {})
+    assert composed([f"+configuration={name}"]).atmosphere.run.time_step == bundle.run.time_step
 
 
 # ---------------------------------------------------------------------------
@@ -433,33 +546,30 @@ def test_atmosphere_subgroup_options_match_jcm(group, option):
 # A Veros configuration declares what its hand-written exchanger writes
 # ---------------------------------------------------------------------------
 
-#: `jax_enable_x64` as it was before any test in this module built a real
-#: `VerosComponent`. Read once, at collection time, rather than inside the
-#: fixture below: importing `veros.core` (triggered the first time
-#: `runners.build_coupler` actually instantiates one) flips it to `True`
-#: process-wide as a side effect, and that flip is permanent for the rest of
-#: the process -- reading it fresh inside the fixture's own setup would
-#: capture the *already-flipped* value on the second of these tests to run.
-_JAX_X64_BEFORE_ANY_VEROS_CONFIG_TEST = jax.config.read("jax_enable_x64")
-
-
-@pytest.fixture(scope="module")
+@pytest.fixture
 def _veros_x64():
-    """Force `jax_enable_x64` on for these tests, and restore it after all of them.
+    """Restore `jax_enable_x64` after a test that builds a Veros configuration.
 
-    Only requested by the two Veros tests below (not `autouse`), so it
-    neither forces every other test in this file to run in double precision
-    nor tears down between the two -- see `test_veros_setups.py`'s identical
-    fixture for why restoring *after each* test rather than once at the end
-    is actually the wrong thing here: doing so left the second of two Veros
-    tests silently degraded to float32 (`veros.core` is only imported once
-    per process, so only the *first* build re-triggers the `jax_enable_x64`
-    flip; restoring to `False` after it leaves nothing to flip it back for
-    the second).
+    `runners.build_coupler` sets the process-global flag from the
+    configuration (`ocean=veros` selects `true`), and Veros' own first import
+    of its operators turns it on as well, so a test that builds one changes the
+    precision of whatever runs next in the process. The value is read when the
+    test starts, so it is whatever the previous test left, and put back when
+    the test ends. Restoring after *each* test is safe because every build
+    sets the flag itself, rather than relying on Veros' once-per-process flip.
     """
-    jax.config.update("jax_enable_x64", True)
+    before = jax.config.read("jax_enable_x64")
     yield
-    jax.config.update("jax_enable_x64", _JAX_X64_BEFORE_ANY_VEROS_CONFIG_TEST)
+    jax.config.update("jax_enable_x64", before)
+
+
+#: The atmosphere forcing fields each Veros configuration's hand-written
+#: exchanger writes: the ocean's SST, and with `veros-earth`'s Winton ice the
+#: ice's fraction and skin temperature.
+EXCHANGED_FORCING = {
+    "veros-double-drake": ("sea_surface_temperature",),
+    "veros-earth": ("sea_surface_temperature", "sice_am", "sea_ice_temperature"),
+}
 
 
 @pytest.mark.slow
@@ -467,59 +577,102 @@ def _veros_x64():
 def test_veros_configurations_declare_the_atmosphere_field_their_exchanger_writes(
     configuration, caplog, _veros_x64
 ):
-    """``coupling.exchanged_forcing`` is set, and does nothing under the default.
+    """``coupling.exchanged_forcing`` names what the hand-written exchanger writes.
 
     Both shipped Veros configurations use the hand-written
     ``jem.fluxes.VerosExchange`` (``coupling.exchanger``), which
     ``declare_exchanged_forcing`` cannot read a field set off of the way it
     reads ``jem.exchangers.Exchange``'s table -- so, unlike every other
     shipped configuration, they have to declare ``coupling.exchanged_forcing``
-    by hand. `VerosExchange` writes exactly one atmosphere-facing field,
-    ``sea_surface_temperature`` (see `jem.fluxes.VerosExchange.__call__`; its
-    other writes are onto the *ocean's* own forcing).
+    by hand. `VerosExchange` writes the ocean's ``sea_surface_temperature``
+    into the atmosphere and, with a Winton ice composed (``veros-earth``), the
+    ice's ``sice_am`` and ``sea_ice_temperature`` (see
+    `jem.fluxes.VerosExchange.__call__`; its other writes are onto the
+    *ocean's* own forcing).
 
-    With the default `forcing@atmosphere.forcing` (`ForcingData.zeros()`,
-    already all plain arrays) the declaration has nothing to collapse, so
-    this also checks that declaring a field the default forcing never makes
-    time-varying does not trip the "declared but not time-varying" warning
-    (`declare_exchanged_forcing`'s `if pinned and atm.time_varying_forcing`
-    guard, which only fires when *something* is still a `TimeSeries`) --
-    that would otherwise fire on every shipped Veros run.
+    ``sea_ice_temperature`` is not a time series in the forcing file (the
+    atmosphere seeds it), so the runner warns that declaring it is only
+    meaningful if something writes it -- here the ice does. That warning is
+    expected for ``veros-earth`` about that one field and for nothing else, and
+    never for ``veros-double-drake``, whose one field is time-varying.
     """
     import jem.runners as runners
 
     with caplog.at_level("WARNING", logger="jem.runners"):
         coupler = runners.build_coupler(composed([f"+configuration={configuration}"]))
-    assert coupler.components["atm"].exchanged_forcing == ("sea_surface_temperature",)
-    assert "not time-varying" not in caplog.text
+    assert coupler.components["atm"].exchanged_forcing == EXCHANGED_FORCING[configuration]
+    warned = [r.getMessage() for r in caplog.records if "not time-varying" in r.getMessage()]
+    if configuration == "veros-earth":
+        assert len(warned) == 1 and "names sea_ice_temperature," in warned[0]
+    else:
+        assert not warned
+
+
+@pytest.mark.slow
+def test_veros_earth_has_an_observed_land_climatology_and_double_drake_an_idealised_one(_veros_x64):
+    """``veros-earth`` runs on Earth's land boundary conditions; the idealised planet on its own.
+
+    ``ForcingData.zeros`` -- what an atmosphere with no forcing file gets --
+    has a bare-land albedo of 0, so a configuration left on it has black
+    continents. ``veros-earth`` therefore composes jax-gcm's packaged
+    climatology, and its sea surface temperature is still the ocean's:
+    ``sea_surface_temperature`` is one of the time-varying fields the
+    coupling overwrites. ``veros-double-drake``'s continents are idealised,
+    so Earth's climatology would sit on the wrong geography; it composes the
+    packaged uniform land of ``jem.tools.idealised_terrain.idealised_forcing``
+    instead, replayed every year, and declares the same exchanged field.
+    """
+    import jem.runners as runners
+
+    earth = runners.build_coupler(composed(["+configuration=veros-earth"]))
+    atm = earth.components["atm"]
+    forcing = earth.initialize().components["atm"]["forcing"]
+    assert float(forcing.alb0.max()) > 0.4
+    assert {"snowc_am", "soilw_am", "stl_am"} <= set(atm.time_varying_forcing)
+    assert atm.exchanged_forcing == EXCHANGED_FORCING["veros-earth"]
+
+    drake = runners.build_coupler(composed(["+configuration=veros-double-drake"]))
+    atm = drake.components["atm"]
+    forcing = drake.initialize().components["atm"]["forcing"]
+    # A lit land (not ForcingData.zeros' black one): the generator's ice-free
+    # albedo everywhere except the polar ice cap, which has its ice sheet's.
+    import inspect
+
+    from jem.tools.idealised_terrain import idealised_forcing
+
+    defaults = {
+        name: parameter.default
+        for name, parameter in inspect.signature(idealised_forcing).parameters.items()
+    }
+    assert float(forcing.alb0.min()) == pytest.approx(defaults["bare_land_albedo"])
+    assert float(forcing.alb0.max()) == pytest.approx(defaults["ice_cap_albedo"])
+    assert {"snowc_am", "soilw_am", "stl_am"} <= set(atm.time_varying_forcing)
+    assert atm.exchanged_forcing == ("sea_surface_temperature",)
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("configuration", ["veros-double-drake", "veros-earth"])
 def test_veros_configurations_couple_a_responding_land_surface(configuration, _veros_x64):
-    """The WHY comment's documented override -- a file-forced atmosphere --
-    actually traces, rather than tripping the carry-structure refusal.
+    """A file-forced atmosphere traces, rather than tripping the carry-structure refusal.
 
-    Both configurations' WHY comments tell the user they can add
-    ``forcing@atmosphere.forcing=from_file`` for a responding land surface
-    instead of the flat `ForcingData.zeros()` boundary conditions `land=none`
-    otherwise leaves in place. That builds every boundary condition,
+    ``forcing@atmosphere.forcing=from_file`` builds every boundary condition,
     including ``sea_surface_temperature``, as a `jcm.forcing.TimeSeries` --
     which is exactly what `coupling.exchanged_forcing` above exists to
     reconcile: without it, `VerosExchange` overwriting
     ``sea_surface_temperature`` with a plain array on the first coupled step
     changes the atmosphere's carry structure and `lax.scan` refuses the whole
-    trajectory.
+    trajectory. ``veros-earth`` composes this forcing itself; for
+    ``veros-double-drake`` it is an override, and both are given the same
+    file here so the test exercises the same boundary conditions.
 
     Traced with `jax.make_jaxpr` rather than `jax.eval_shape`: a real
     `VerosComponent`'s pytree unflatten calls `.astype`/`asarray` on its
     variables, which `jax.eval_shape`'s abstract `ShapeDtypeStruct` avals
-    cannot satisfy (`TypeError: ... not 'ShapeDtypeStruct'`) even for the
-    unmodified default configuration -- a pre-existing `eval_shape`/Veros
-    incompatibility this test's fix does not touch, so it is worked around
-    here rather than papered over. `make_jaxpr` traces the same step through
-    real (concrete-shaped) tracers without running any physics, which is
-    exactly as cheap a check that the carry's structure survives the step.
+    cannot satisfy (`TypeError: ... not 'ShapeDtypeStruct'`) even for an
+    ordinary configuration, so it is worked around here. `make_jaxpr` traces
+    the same step through real (concrete-shaped) tracers without running any
+    physics, which is as cheap a check as any that the carry's structure
+    survives the step.
     """
     import jem.runners as runners
 
@@ -528,12 +681,72 @@ def test_veros_configurations_couple_a_responding_land_surface(configuration, _v
         "forcing@atmosphere.forcing=from_file",
         "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
     ]))
-    assert coupler.components["atm"].exchanged_forcing == ("sea_surface_temperature",)
+    assert coupler.components["atm"].exchanged_forcing == EXCHANGED_FORCING[configuration]
     carry = coupler.initialize()
     # Raises (a `RuntimeError` from `lax.scan`, naming the workflow element)
     # if the carry's structure changes across the step; a clean trace is the
     # assertion.
     jax.make_jaxpr(coupler.generate_trajectory_function(1))(carry)
+
+
+@pytest.mark.slow
+def test_a_veros_configuration_builds_the_atmosphere_in_double_precision(_veros_x64):
+    """Nothing is allocated in float32 before Veros turns x64 on.
+
+    `ocean=veros` selects `jax_enable_x64=true` and the runner applies it
+    before the atmosphere is built, so the atmosphere's arrays are float64
+    whichever order Veros' import and the atmosphere's construction happen in.
+    The atmosphere's prescribed forcing is not counted: jax-gcm builds its
+    solar-geometry scalars, the empty analytic-ozone array and every field it
+    loads from a forcing file as float32 on purpose, whatever the flag.
+    """
+    import jax.numpy as jnp
+
+    import jem.runners as runners
+
+    jax.config.update("jax_enable_x64", False)
+    coupler = runners.build_coupler(composed(["+configuration=veros-double-drake"]))
+    assert jax.config.read("jax_enable_x64") is True
+    carry = coupler.initialize()
+    for component in ("atm", "ocn"):
+        dtypes = set()
+        for path, leaf in jax.tree_util.tree_leaves_with_path(carry.components[component]):
+            array = jnp.asarray(leaf)
+            fixed = component == "atm" and "forcing" in jax.tree_util.keystr(path)
+            if jnp.issubdtype(array.dtype, jnp.floating) and not fixed:
+                dtypes.add(str(array.dtype))
+        assert dtypes == {"float64"}, component
+
+
+@pytest.mark.slow
+def test_a_veros_configuration_that_asks_for_float32_is_refused():
+    """`ocean=veros jax_enable_x64=false` cannot be honoured, and says so.
+
+    Veros turns x64 on the first time its operators are imported, which is
+    only once per process, so the refusal is only reproducible in a process
+    that has not yet imported them: this runs one.
+    """
+    script = (
+        "from hydra import compose, initialize_config_module\n"
+        "import jem.config\n"
+        "from jem import runners\n"
+        "with initialize_config_module(config_module='jem.config', version_base='1.3'):\n"
+        "    cfg = compose(config_name='config', overrides=["
+        "'+configuration=veros-double-drake', 'jax_enable_x64=false'])\n"
+        "try:\n"
+        "    runners.build_coupler(cfg)\n"
+        "except RuntimeError as exc:\n"
+        "    print('REFUSED', exc)\n"
+        "else:\n"
+        "    print('BUILT')\n"
+    )
+    env = {**os.environ, "JAX_PLATFORMS": "cpu"}
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, env=env,
+        timeout=600,
+    )
+    assert "REFUSED" in result.stdout, result.stdout + result.stderr[-2000:]
+    assert "jax_enable_x64=true" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -587,3 +800,10 @@ def test_installed_wheel_has_config(tmp_path):
     names = set(zipfile.ZipFile(wheels[0]).namelist())
     assert "jem/config/config.yaml" in names
     assert "jem/config/configuration/earth-slab.yaml" in names
+    # The MITgcm notice travels with the Winton port it covers: beside the
+    # code, where the module's docstring points, and with the licence files.
+    notice = "jem/components/slab/winton_seaice_model/NOTICE"
+    assert notice in names
+    assert any(
+        name.endswith(f".dist-info/licenses/{notice}") for name in names
+    ), sorted(name for name in names if ".dist-info/" in name)

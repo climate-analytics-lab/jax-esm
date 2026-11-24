@@ -7,6 +7,12 @@ REM Command file for Sphinx documentation
 if "%SPHINXBUILD%" == "" (
 	set SPHINXBUILD=sphinx-build
 )
+REM The same strictness as docs/Makefile: a warning fails the build, every
+REM warning is still reported, and an unresolved cross-reference is a warning. Unlike the Makefile this does not copy examples/
+REM into the Sphinx source tree; use docs/build_docs.sh (bash) for the notebooks.
+if "%SPHINXOPTS%" == "" (
+	set SPHINXOPTS=-W --keep-going -n
+)
 set SOURCEDIR=source
 set BUILDDIR=build
 

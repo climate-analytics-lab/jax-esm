@@ -66,6 +66,25 @@ def test_load_monthly_climatology_is_shared_and_transposes_by_name(tmp_path, uni
     np.testing.assert_allclose(np.asarray(loaded), np.transpose(values, (2, 1, 0)))
 
 
+@pytest.mark.parametrize("file_dtype", ["float32", "float64"])
+@pytest.mark.parametrize("x64, expected", [(True, "float64"), (False, "float32")])
+def test_a_loaded_climatology_has_the_working_precision_not_the_files(
+    tmp_path, uniform_grid, file_dtype, x64, expected
+):
+    """The loader returns the process's float dtype whatever the file stores.
+
+    Components seed their state from this array and step in the working
+    precision, so a float32 file read as float32 under ``jax_enable_x64``
+    would start a carry that the first step returns as float64.
+    """
+    values = monthly_ramp().astype(file_dtype)
+    path = write_climatology(tmp_path / "field.nc", "field", values)
+    with jax.enable_x64(x64):
+        loaded = load_monthly_climatology(path, "field", uniform_grid)
+    assert str(loaded.dtype) == expected
+    np.testing.assert_allclose(np.asarray(loaded), np.transpose(values, (2, 1, 0)))
+
+
 def test_qflux_file_is_loaded(tmp_path, uniform_grid):
     """A Q-flux file is read into the forcing carry, transposed by name."""
     values = monthly_ramp()

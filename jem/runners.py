@@ -31,10 +31,12 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import hydra.utils
+import jax
 import jax_datetime as jdt
 import xarray as xr
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, ListConfig, OmegaConf
+from omegaconf.errors import MissingMandatoryValue
 
 # Importing the config package registers the ${jcm_data:}/${jem_data:}
 # resolvers. A config composed elsewhere (`jem.main`, a test) has already done
@@ -50,6 +52,7 @@ from jem.exchangers import (
     Exchange,
     default_exchangers,
     exchanged_fields,
+    land_temperature_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -288,18 +291,97 @@ def build_grid(node: Any, atm: JCMComponent) -> SlabGrid:
     )
 
 
-def build_component(node: Any, **injected: Any) -> Any:
+#: Spellings of the override that supplies a required input, by the input's
+#: key within its node: the packaged-file resolver where the repo's own docs
+#: use one (``docs/source/getting_started.rst``, the ``--help`` text), the
+#: shape of the value otherwise. Only a hint -- the error names the full key
+#: either way.
+_MISSING_INPUT_EXAMPLES = {
+    "sst_clim_file": "'${jcm_data:bc/t30/clim/forcing.nc}'",
+    "ice_clim_file": "'${jcm_data:bc/t30/clim/forcing.nc}'",
+    "a2o_conserve": "'${jem_data:weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc}'",
+    "a2o_bilinear": "'${jem_data:weight_algo-bilinear_JCM_T31_to_DisplacedPoleGrid.nc}'",
+    "o2a_conserve": "'${jem_data:weight_algo-conserve_DisplacedPoleGrid_to_JCM_T31.nc}'",
+    "o2a_bilinear": "'${jem_data:weight_algo-bilinear_DisplacedPoleGrid_to_JCM_T31.nc}'",
+    "setup": "jem.components.veros.setups.double_drake.double_drake_setup",
+}
+
+
+def _missing_keys(node: Any, prefix: str) -> list[str]:
+    """Return the full dotted keys under ``node`` whose value is still ``???``."""
+    if not isinstance(node, DictConfig):
+        return []
+    missing: list[str] = []
+    for key in node:
+        full = f"{prefix}.{key!s}"
+        if OmegaConf.is_missing(node, key):
+            missing.append(full)
+        else:
+            missing.extend(_missing_keys(node[key], full))
+    return missing
+
+
+def _missing_input_message(node: Any, key: str | None) -> str:
+    """Say which required inputs of ``node`` are unset and how to supply them."""
+    prefix = key if key is not None else "<component>"
+    missing = _missing_keys(node, prefix)
+    lines = []
+    for full in missing:
+        example = _MISSING_INPUT_EXAMPLES.get(full.rsplit(".", 1)[-1], "<value>")
+        lines.append(f"  {full}={example}")
+    names = ", ".join(missing) if missing else "a required input"
+    return (
+        f"The config leaves {names} unset (it is `???` in the selected "
+        f"`{prefix.split('.')[0]}` option, which cannot invent it). Add an "
+        "override for each on the command line, in single quotes so that the "
+        "shell leaves a `${...}` resolver for Hydra:\n" + "\n".join(lines)
+    )
+
+
+def _fetch_mirror_files(value: Any) -> Any:
+    """Replace every ``hf://`` path in a resolved config by a local file.
+
+    jax-gcm's configuration bundles name their boundary files on its data
+    mirror (``hf://bundles/t63/forcing_pd.nc``), and jax-gcm fetches them into
+    the local Hugging Face cache when it builds the atmosphere. A surface
+    component that reads the same file -- a slab ocean relaxing to the SST of
+    ``${atmosphere.forcing.file}`` -- is handed the name by interpolation, and
+    opens files with xarray, which does not know the scheme. Fetching here,
+    through jax-gcm's own :func:`jcm.data.remote.fetch`, hands the component
+    the very file the atmosphere reads, at the mirror revision the process is
+    pinned to.
+    """
+    if isinstance(value, dict):
+        return {key: _fetch_mirror_files(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_fetch_mirror_files(item) for item in value]
+    if isinstance(value, str) and value.startswith("hf://"):
+        from jcm.data.remote import fetch
+
+        return fetch(value.removeprefix("hf://"))
+    return value
+
+
+def build_component(node: Any, *, key: str | None = None, **injected: Any) -> Any:
     """Instantiate one component (or None) from its config node.
 
     ``hydra.utils.instantiate`` on everything but the runner-only keys, with
     the objects this module made passed as keyword arguments. A ``None`` node
     -- what ``ocean=none`` composes to -- builds nothing, so a configuration
-    drops a component by selecting an option rather than by a flag here.
+    drops a component by selecting an option rather than by a flag here. A
+    value naming a file on jax-gcm's data mirror (``hf://...``) reaches the
+    constructor as the path of the fetched local file
+    (:func:`_fetch_mirror_files`).
 
     Parameters
     ----------
     node : omegaconf.DictConfig or None
         The component's config node.
+    key : str, optional
+        The config key ``node`` sits at (``"ocean"``, ``"regrid"``). Used only
+        to name a missing required input by its full key: OmegaConf reports
+        just the leaf (``sst_clim_file``), which does not say which group it
+        belongs to.
     **injected
         Objects the config cannot name, passed to the constructor.
 
@@ -310,9 +392,9 @@ def build_component(node: Any, **injected: Any) -> Any:
 
     Raises
     ------
-    omegaconf.MissingMandatoryValue
+    omegaconf.errors.MissingMandatoryValue
         If the node leaves a required input (``???``) unset. The message names
-        the full config key, so the fix is the override to add.
+        the full config key (``ocean.sst_clim_file``) and the override to add.
 
     """
     if node is None:
@@ -321,7 +403,10 @@ def build_component(node: Any, **injected: Any) -> Any:
     # the config node, so that the runner-only keys can be dropped without
     # mutating the composed config a caller may still be reading (and
     # `python -m jem.main --cfg job` still prints what the run was given).
-    config = OmegaConf.to_container(node, resolve=True, throw_on_missing=True)
+    try:
+        config = OmegaConf.to_container(node, resolve=True, throw_on_missing=True)
+    except MissingMandatoryValue as error:
+        raise MissingMandatoryValue(_missing_input_message(node, key)) from error
     if not isinstance(config, dict):
         raise TypeError(
             f"A component config node must be a mapping with a `_target_`; got "
@@ -329,6 +414,7 @@ def build_component(node: Any, **injected: Any) -> Any:
         )
     for key in RUNNER_ONLY_KEYS:
         config.pop(key, None)
+    config = _fetch_mirror_files(config)
     # `_convert_="object"` for two reasons: a constructor is handed plain
     # Python values rather than OmegaConf containers, which behave differently
     # under JAX and numpy; and an *injected* object survives as itself. The
@@ -361,7 +447,7 @@ def build_regridders(cfg: DictConfig) -> dict[str, Callable[[Any], Any]]:
     dict[str, Callable]
 
     """
-    regridders = build_component(cfg.get("regrid"))
+    regridders = build_component(cfg.get("regrid"), key="regrid")
     if regridders is None:
         return {}
     named = dict(regridders)
@@ -575,7 +661,7 @@ def declare_exchanged_forcing(
     has no writer -- and this function raises. When *any* active exchanger is
     hand-written (not an ``Exchange``), nothing can be concluded -- that
     opacity is exactly why the explicit declaration exists in the first
-    place -- so this function stays silent there, same as today, and the
+    place -- so this function stays silent there, and the
     hand-written field is the user's to get right.
 
     This is an error rather than a warning, unlike the sibling checks: a
@@ -618,8 +704,8 @@ def declare_exchanged_forcing(
     # that is registered but that `workflow` never names (the uncoupled
     # comparison run the module docstring above describes) is exactly as
     # inert as one that was never built at all. `workflow=None` -- a caller
-    # with no coupler to resolve one from -- keeps the old behaviour of
-    # reading every registered exchanger.
+    # with no coupler to resolve one from -- reads every registered
+    # exchanger.
     active = (
         exchangers if workflow is None
         else {name: exchanger for name, exchanger in exchangers.items()
@@ -765,12 +851,97 @@ def declare_exchanged_forcing(
         atm.set_exchanged_forcing(())
 
 
+#: The top-level config key that sets the process's JAX precision. ``null``
+#: (the key's value in ``config.yaml``) is the absence of a setting: JAX stays
+#: as the process has it, which is float32 unless the caller turned x64 on.
+PRECISION_KEY = "jax_enable_x64"
+
+
+def apply_precision(cfg: DictConfig) -> bool:
+    """Set the process's JAX precision from ``cfg``, and return what it must stay.
+
+    ``jax_enable_x64`` is **process-global**, and it decides the dtype of
+    every array JAX allocates from then on. A component that allocates
+    arrays while it is being built (the atmosphere's ``Model``, every slab's
+    grid and climatologies) therefore inherits whatever the flag is *at that
+    moment*, so it has to be set before the first component is built, and
+    must not change afterwards: an atmosphere built in float32 and stepped
+    in float64 is a coupled model whose arrays are a mix of the two, which
+    ``jax.lax.scan`` rejects or, worse, accepts with a cast at one boundary.
+
+    ``cfg.jax_enable_x64`` is that setting. ``true`` and ``false`` are applied
+    with ``jax.config.update``; ``null`` leaves the flag as the process has
+    it. A component that cannot run in float32 selects ``true`` in its own
+    config group (``ocean=veros`` does), so the precision is a property of the
+    composed configuration and not of which module a component happens to
+    import first.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        A config composed from ``jem/config/config.yaml``.
+
+    Returns
+    -------
+    bool
+        The value ``jax_enable_x64`` must still have once the components are
+        built: the requested one, or, when nothing was requested, the one the
+        process already had. :func:`build_coupler` compares it with the flag
+        after the build.
+
+    Raises
+    ------
+    TypeError
+        If ``cfg.jax_enable_x64`` is neither ``null`` nor a boolean.
+
+    """
+    requested = cfg.get(PRECISION_KEY)
+    if requested is None:
+        return bool(jax.config.read("jax_enable_x64"))
+    if not isinstance(requested, bool):
+        raise TypeError(
+            f"{PRECISION_KEY} must be true, false or null; got {requested!r} "
+            f"({type(requested).__name__})."
+        )
+    jax.config.update("jax_enable_x64", requested)
+    return requested
+
+
+def _check_precision_unchanged(expected: bool) -> None:
+    """Raise if building the components changed the process's JAX precision.
+
+    Something that was imported or constructed during the build flipped
+    ``jax_enable_x64`` (the Veros ocean does, the first time its operators are
+    imported). The components built *before* the flip -- always the
+    atmosphere -- have arrays of the precision they were built in and would be stepped in
+    the other one, so the model is refused here, loudly, rather than run as a silent
+    mix. This is an error and not a warning because nothing downstream can
+    repair it: the arrays are already allocated.
+    """
+    actual = bool(jax.config.read("jax_enable_x64"))
+    if actual != expected:
+        raise RuntimeError(
+            f"A component changed JAX's float64 mode from {expected} to "
+            f"{actual} while the coupled model was being built, so the "
+            "components built before it hold arrays of the other precision. "
+            f"Set `{PRECISION_KEY}={str(actual).lower()}` in the configuration "
+            "(it is applied before any component is built; a component that "
+            f"needs it selects it in its config group), or `{PRECISION_KEY}="
+            f"{str(expected).lower()}` if that is intended and the component "
+            "does not actually need to change it."
+        )
+
+
 def build_coupler(cfg: DictConfig) -> Coupler:
     """Build the whole coupled model from a composed config.
 
-    The atmosphere first (it owns the clock every other component is checked
-    against, and the grid they default to), then each surface group that is
-    not ``none``, then the exchange and the coupler itself.
+    First the process's JAX precision, from ``cfg.jax_enable_x64`` (see
+    :func:`apply_precision`) -- **a process-global change that outlives this
+    call** -- then the atmosphere (it owns the clock every other component is
+    checked against, and the grid they default to), then each surface group
+    that is not ``none``, then the exchange and the coupler itself. If a
+    component changes the precision while it is being built, the build is
+    refused (:func:`_check_precision_unchanged`).
 
     Parameters
     ----------
@@ -781,7 +952,13 @@ def build_coupler(cfg: DictConfig) -> Coupler:
     -------
     jem.base.coupler.Coupler
 
+    Raises
+    ------
+    RuntimeError
+        If building a component changed ``jax_enable_x64``.
+
     """
+    expected_x64 = apply_precision(cfg)
     atm = build_atmosphere(cfg)
     components: dict[str, Any] = {atm.name: atm}
     for group, name in GROUP_TO_NAME.items():
@@ -789,7 +966,10 @@ def build_coupler(cfg: DictConfig) -> Coupler:
         if node is None:
             logger.debug("No %s component (%s=none).", name, group)
             continue
-        components[name] = build_component(node, **_injected_grid(node, atm))
+        components[name] = build_component(
+            node, key=group, **_injected_grid(node, atm)
+        )
+    _check_precision_unchanged(expected_x64)
 
     regridders = build_regridders(cfg)
     exchangers = build_exchangers(cfg, components, regridders)
@@ -815,6 +995,10 @@ def build_coupler(cfg: DictConfig) -> Coupler:
     declare_exchanged_forcing(cfg, atm, exchangers, workflow=coupler.workflow)
     _validate_exchangers(coupler)
     logger.info("Built %r", coupler)
+    # Which land integrates the temperature follows from two settings made in
+    # different groups (`land` and the atmosphere's physics), so the run says
+    # which it is.
+    logger.info("Land temperature: %s.", land_temperature_source(components))
     return coupler
 
 
@@ -872,7 +1056,7 @@ def run(cfg: DictConfig) -> driver.RunResult:
     jem.driver.RunResult
 
     """
-    logger.info("Composed config:\n%s", OmegaConf.to_yaml(cfg))
+    logger.info("Composed config:\n%s", OmegaConf.to_yaml(cfg, resolve=True))
     settings = build_run_kwargs(cfg)
     logger.info("Writing output to %s", settings["output_dir"])
     return driver.run_chunked(build_coupler(cfg), **settings)
@@ -1063,7 +1247,11 @@ def _coupling_timestep(cfg: DictConfig) -> jdt.Timedelta:
 
 
 def _validate_exchangers(coupler: Coupler) -> None:
-    """Check every declarative exchange against the model's real carries.
+    """Check every exchange against the model's components and real carries.
+
+    An exchanger with a ``check_components`` method (a hand-written one whose
+    pairings the standard table's own checks never see, such as
+    :class:`jem.fluxes.VerosExchange`) is handed the component objects.
 
     :meth:`jem.exchangers.Exchange.validate` turns a mistyped component,
     section, field or regridder into an error naming the spec, before the
@@ -1090,6 +1278,12 @@ def _validate_exchangers(coupler: Coupler) -> None:
         name: exchanger for name, exchanger in coupler.exchangers.items()
         if name in coupler.workflow
     }
+    # The component objects first: a pairing an exchanger refuses outright
+    # (a Winton ice under an atmosphere with no sea flux tile) is reported
+    # before any initial carry is built for it.
+    for exchanger in active.values():
+        if hasattr(exchanger, "check_components"):
+            exchanger.check_components(coupler.components)
     checkable = [
         exchanger
         for exchanger in active.values()

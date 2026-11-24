@@ -4,7 +4,7 @@ __version__ = "1.0.0b0"
 
 # The coupling core only. The components live in `jem.components`, which is
 # not imported here: pulling in the JCM wrapper would import the whole
-# atmosphere (jcm, dinosaur, flax) just to say `import jem`.
+# atmosphere (jcm, dinosaur) just to say `import jem`.
 from jem.base.component import (
     Carry,
     Component,

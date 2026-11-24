@@ -10,6 +10,13 @@ packaged data and (for the `veros-*` configurations) an optional dependency
 ``CONFIGURATIONS`` is discovered from ``jem/config/configuration/*.yaml``
 rather than listed by hand, so a newly added configuration is covered
 automatically the next time this runs.
+
+A configuration whose atmosphere is finer than T31 is composed here but not
+integrated: the ECHAM configurations run jax-gcm's T63 L47 atmosphere, which
+takes minutes per simulated day on a CPU and reads jax-gcm's data mirror, so
+their two days would cost an hour of a pull-request job and a network the job
+may not have. Their plumbing is integrated once, on jax-gcm's smallest ECHAM
+grid, by ``tests/unit/test_echam_configuration.py``.
 """
 
 import importlib.util
@@ -23,6 +30,9 @@ import jem.runners
 from jem.output import output_file_step
 
 CONFIG_MODULE = "jem.config"
+
+#: The finest atmosphere a smoke run integrates (see the module docstring).
+SMOKE_RUN_TRUNCATION = 31
 
 CONFIGURATIONS = sorted(
     p.stem for p in (Path(jem.config.__file__).parent / "configuration").glob("*.yaml")
@@ -44,6 +54,12 @@ def test_configuration_runs(configuration, tmp_path):
                 "coupled_run=short_run",
                 f"coupled_run.output_dir={tmp_path}",
             ],
+        )
+
+    if cfg.atmosphere.grid.spectral_truncation > SMOKE_RUN_TRUNCATION:
+        pytest.skip(
+            f"{configuration!r} runs a T{cfg.atmosphere.grid.spectral_truncation} "
+            "atmosphere; see this module's docstring"
         )
 
     result = jem.runners.run(cfg)

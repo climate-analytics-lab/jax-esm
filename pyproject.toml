@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+# >=77 for `license = "MIT"` and `license-files` below: an SPDX licence
+# expression is PEP 639, which older setuptools reject as an invalid
+# `project.license` before building anything.
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,14 +11,26 @@ description = "A JAX-based Earth System Model coupler for coupling atmospheric, 
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+# The second file is the MITgcm copyright and permission notice: the Winton
+# sea ice's thermodynamics are a port of MITgcm's thsice package, whose MIT
+# licence requires that notice to travel with every copy. Listing it here puts
+# it in the sdist and in the wheel's `licenses/` directory.
+license-files = [
+    "LICENSE",
+    "jem/components/slab/winton_seaice_model/NOTICE",
+]
 authors = [
     {name = "JAX-ESM Developers", email = "dwatsonparris@ucsd.edu"},
 ]
 keywords = ["earth-system-modeling", "climate", "jax", "coupling"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    # Follows the version: `jem.__version__` is a beta of 1.0, and
+    # `test_the_declared_status_follows_the_version` holds this, the README
+    # badge and the docs' front page to it.
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
 ]
 dynamic = ["version"]
@@ -38,19 +53,22 @@ dependencies = [
     "netcdf4",
     "tree_math",
     "jax_datetime",
-    # A floor, not the pin. 3.0.0rc1 is what jax-gcm reports at the supported
-    # revision; it is the first version whose `Model` publishes its resumable
-    # state and its date conversion publicly and takes no `log_level`
-    # (jax-gcm#819, #824), which is what the JCM adapter is written against.
-    # It is not on PyPI, so this is satisfied only by an editable install of a
-    # jax-gcm checkout. Which checkout is recorded once, in
-    # `jem/components/jcm/contract.py` (JCM_SUPPORTED_REV), together with every
-    # jax-gcm name JAX-ESM calls and how to bump the pin; the CI workflow and
-    # the contract test both read from there. jax-gcm bumps its version only at
-    # release, so a version floor cannot express "this sha" -- do not try to
-    # tighten it here. (A release candidate satisfies a floor that names it:
-    # PEP 440 orders 3.0.0rc1 >= 3.0.0rc1, so the requirement is installable.)
-    "jcm>=3.0.0rc1",
+    # A floor, not the pin: the version jax-gcm reports at the supported
+    # revision (JCM_SUPPORTED_VERSION in `jem/components/jcm/contract.py`;
+    # `test_the_jcm_floor_is_the_supported_version` keeps the two equal). It
+    # has to be this high because the newest jcm on PyPI, 3.0.0, predates
+    # names the JCM adapter imports at module scope: a lower floor lets
+    # `pip install jax-esm` resolve to it and produce an install on which
+    # `import jem.components` raises ImportError. With this floor pip instead
+    # stops with "no matching distribution for jcm>=3.1.0" until jax-gcm 3.1.0
+    # is released, and the requirement is met by installing a jax-gcm checkout
+    # first. Which checkout is recorded once, in `contract.py`
+    # (JCM_SUPPORTED_REV), together with every jax-gcm name JAX-ESM calls and
+    # how to bump the pin; the CI workflow and the contract test both read
+    # from there. jax-gcm bumps its version only at release, so a version
+    # floor cannot express "this sha" -- several unreleased revisions report
+    # 3.1.0, and only the pinned one is supported.
+    "jcm>=3.1.0",
     "flax",
     # >=1.3 for `hydra.utils.get_object`, which `jem.runners._accepts_grid`
     # uses to resolve a `_target_` that may be either a class or a
@@ -84,8 +102,9 @@ dev = [
     # tests/unit/test_config.py builds a wheel through setuptools' PEP 517
     # hook to check the config tree ships as package data. Python 3.12 venvs
     # no longer carry setuptools by default (only 3.11 and earlier do), so it
-    # is a test dependency in its own right.
-    "setuptools>=61.0",
+    # is a test dependency in its own right. The floor is the build system's
+    # (see `[build-system]`).
+    "setuptools>=77.0",
     "mypy",
     "ruff==0.15.17",
     "nbformat",
@@ -113,6 +132,9 @@ include = ["jem*"]  # Automatically finds jem, jem.base, etc.
 jem = [
     "config/**/*.yaml",
     "data/*.nc",
+    # Beside the code it covers as well as under `licenses/`: the Winton
+    # module's docstring points a reader at "NOTICE in this package".
+    "components/slab/winton_seaice_model/NOTICE",
 ]
 
 # Single source of truth for the version: `jem.__version__`. Reading it from

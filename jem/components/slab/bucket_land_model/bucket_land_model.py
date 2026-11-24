@@ -9,9 +9,13 @@ the precipitation and the evaporation over the land part of each cell, and
 hands the atmosphere the availability it diagnoses, so the land's
 evaporation responds to its own wetting and drying.
 
-The model was first written by Tien-Yiao Hsu as the soil-water part of
-JAX-ESM's former thermal slab land (jax-esm#154); the thermal part is gone,
-since it duplicated SPEEDY's own.
+The model was written by Tien-Yiao Hsu as the soil-water part of JAX-ESM's
+slab land. The soil water is a set of module-level pure functions
+(:func:`initial_soil_water`, :func:`step_soil_water`,
+:func:`soil_water_availability`) that
+:class:`~jem.components.slab.slab_land_model.SlabLandModel`, which adds a
+thermal slab, snow and an albedo of its own for a run whose land is not the
+atmosphere's, calls as well, so the two models have one soil water.
 """
 
 import logging
@@ -36,10 +40,6 @@ from jem.utils.cycles import evaluate_cyclic_linear
 
 logger = logging.getLogger(__name__)
 
-#: Density of liquid water (kg m-3): converts a water flux (kg m-2 s-1) into a
-#: depth of water per second (m s-1).
-WATER_DENSITY = 1000.0
-
 #: The variable a soil-water-availability climatology is read from -- the
 #: name jax-gcm's packaged boundary conditions give SPEEDY's ``soilw_am``.
 SOIL_WATER_AVAILABILITY_VARIABLE = "soilw_am"
@@ -51,8 +51,8 @@ class BucketLandState:
 
     Attributes
     ----------
-    soil_water_content : (n_lon, n_lat, 2) array
-        Volumetric water content (m3 m-3) of the surface and the deep layer.
+    soil_water_content : jax.Array
+        Shape ``(n_lon, n_lat, 2)``: volumetric water content (m3 m-3) of the surface and the deep layer.
         Zero where the cell has no land.
 
     """
@@ -139,7 +139,9 @@ class BucketLandDerived:
 
 
 def soil_water_availability(
-    soil_water_content: jnp.ndarray, params: BucketLandParameters
+    soil_water_content: jnp.ndarray,
+    params: BucketLandParameters,
+    vegetation_fraction: float | jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """SPEEDY's soil water availability ``soilw_am`` of a two-layer soil.
 
@@ -147,20 +149,24 @@ def soil_water_availability(
     d2 (fc2 - wp2))``, clipped to [0, 1]: with SPEEDY's depths
     (``d2 = idep2 d1``), wilting points and field capacity this is the
     availability its forcing preprocessor computes from the soil water
-    climatology. ``soil_water_content`` is ``(..., 2)``.
+    climatology. ``soil_water_content`` is ``(..., 2)``. ``vegetation_fraction``
+    is a scalar or a map on the grid; ``None`` takes the uniform
+    ``params.vegetation_fraction``.
     """
-    available = _available_water(soil_water_content, params)
+    available = _available_water(soil_water_content, params, vegetation_fraction)
     return jnp.clip(jnp.sum(available, axis=-1) / _capacity(params), 0.0, 1.0)
 
 
-def _available_water(soil_water_content, params):
+def _available_water(soil_water_content, params, vegetation_fraction=None):
     """Depth (m) of water each layer can give: ``(..., 2)``."""
+    if vegetation_fraction is None:
+        vegetation_fraction = params.vegetation_fraction
     depth = params.soil_bucket_depth
     wilting = params.soil_water_wilting_point
     above_wilting = jnp.maximum(soil_water_content - wilting, 0.0)
     return jnp.stack(
         [depth[0] * above_wilting[..., 0],
-         params.vegetation_fraction * depth[1] * above_wilting[..., 1]],
+         vegetation_fraction * depth[1] * above_wilting[..., 1]],
         axis=-1,
     )
 
@@ -172,11 +178,189 @@ def _capacity(params):
         depth * (params.soil_water_field_capacity - params.soil_water_wilting_point))
 
 
+def initial_soil_water(
+    land: jnp.ndarray,
+    params: BucketLandParameters,
+    vegetation_fraction: float | jnp.ndarray,
+    availability_climatology: jnp.ndarray | None = None,
+    year_fraction: float = 0.0,
+) -> jnp.ndarray:
+    """Return the soil water a run starts from, ``(n_lon, n_lat, 2)``, zero off land.
+
+    The one definition of the initial condition, shared by every land model
+    whose soil water is this bucket's (:class:`BucketLandModel` and
+    :class:`~jem.components.slab.slab_land_model.SlabLandModel`).
+
+    With an availability climatology the soil starts from the availability
+    observed at ``year_fraction``: both layers are filled to the same
+    fraction of their range, the one that gives that availability (or field
+    capacity, where vegetation keeps the deep layer from reaching it).
+    Without one, both layers start at ``params.initial_soil_water_fill`` of
+    their range.
+
+    Parameters
+    ----------
+    land : jax.Array
+        Boolean ``(n_lon, n_lat)``: the cells that hold soil.
+    params : BucketLandParameters
+        The soil's depths, wilting points, field capacities and initial fill.
+    vegetation_fraction : float or jax.Array
+        The vegetation weighting of the deep layer: a scalar or an
+        ``(n_lon, n_lat)`` map.
+    availability_climatology : jax.Array, optional
+        Monthly ``(n_lon, n_lat, 12)`` soil water availability.
+    year_fraction : float
+        Where in the annual cycle the climatology is read.
+
+    Returns
+    -------
+    jax.Array
+        The initial volumetric water content (m3 m-3).
+
+    """
+    wilting = params.soil_water_wilting_point
+    capacity = params.soil_water_field_capacity
+
+    if availability_climatology is not None:
+        target = jnp.clip(jnp.where(
+            land[..., None], availability_climatology, 0.0), 0.0, 1.0)
+        target = evaluate_cyclic_linear(year_fraction, target)
+        # Both layers at the same fraction ``s`` of their range give an
+        # availability of ``s * (d1 (fc1 - wp1) + veg d2 (fc2 - wp2)) /
+        # capacity``, so ``s`` follows from the target directly.
+        full = _available_water(
+            jnp.broadcast_to(capacity, land.shape + (2,)), params, vegetation_fraction)
+        reachable = jnp.sum(full, axis=-1) / _capacity(params)
+        fill = jnp.clip(target / jnp.where(reachable > 0.0, reachable, 1.0), 0.0, 1.0)
+    else:
+        fill = jnp.broadcast_to(
+            jnp.asarray(params.initial_soil_water_fill, dtype=float), land.shape)
+
+    return jnp.where(
+        land[..., None], wilting + fill[..., None] * (capacity - wilting), 0.0)
+
+
+def step_soil_water(
+    soil_water_content: jnp.ndarray,
+    precipitation: jnp.ndarray,
+    evaporation: jnp.ndarray,
+    dt: float | jnp.ndarray,
+    params: BucketLandParameters,
+    vegetation_fraction: float | jnp.ndarray,
+    grid: SlabGrid,
+) -> tuple[jnp.ndarray, BucketLandDerived]:
+    """Advance the two-layer soil water by one step: the bucket's physics.
+
+    The one implementation of the soil water, shared by every land model
+    that has this bucket (see :class:`BucketLandModel` for the processes and
+    their order). Only cells with land (``grid.land_mask``) are integrated;
+    the rest hold zero water and report zero fluxes.
+
+    Parameters
+    ----------
+    soil_water_content : jax.Array
+        ``(n_lon, n_lat, 2)`` volumetric water content (m3 m-3).
+    precipitation : jax.Array
+        ``(n_lon, n_lat)`` precipitation (kg m-2 s-1, positive down).
+    evaporation : jax.Array
+        ``(n_lon, n_lat)`` evaporation over the land part of the cell
+        (kg m-2 s-1, positive up).
+    dt : float
+        The step length (s).
+    params : BucketLandParameters
+        The soil's parameters. ``params.vegetation_fraction`` is not read:
+        the caller says which vegetation fraction applies.
+    vegetation_fraction : float or jax.Array
+        The vegetation weighting of the deep layer, a scalar or an
+        ``(n_lon, n_lat)`` map: the bucket's uniform parameter, or the slab
+        land's state.
+    grid : SlabGrid
+        The model grid; it has to carry ``cell_solid_angle`` for the runoff's
+        mass rate.
+
+    Returns
+    -------
+    new_soil_water_content : jax.Array
+        ``(n_lon, n_lat, 2)``, zero off land.
+    derived : BucketLandDerived
+        The availability at the end of the step and the fluxes of this step.
+
+    """
+    land = grid.land_mask
+    # Liquid-water density (kg m-3) converts a water flux (kg m-2 s-1) into a depth
+    # of water per second (m s-1). It is the atmosphere's own constant, read by
+    # attribute when the step is traced so a set_constants(...) override reaches it.
+    water_density = jcm_constants.rhow
+
+    depth = params.soil_bucket_depth
+    wilting = params.soil_water_wilting_point
+    capacity = params.soil_water_field_capacity
+    tau = params.drainage_timescale
+    water = soil_water_content
+
+    # 1. Precipitation, into the surface layer.
+    surface = water[..., 0] + precipitation / water_density * dt / depth[0]
+    deep = water[..., 1]
+
+    # 2. Evaporation, shared by the water each layer can give; dew all to
+    # the surface layer. A layer is not taken below its wilting point.
+    available = _available_water(
+        jnp.stack([surface, deep], axis=-1), params, vegetation_fraction)
+    total = jnp.sum(available, axis=-1)
+    surface_share = jnp.where(
+        total > 0.0, available[..., 0] / jnp.where(total > 0.0, total, 1.0), 1.0)
+    evaporated = evaporation / water_density * dt
+    surface_share = jnp.where(evaporated < 0.0, 1.0, surface_share)
+    surface_asked = surface - surface_share * evaporated / depth[0]
+    deep_asked = deep - (1.0 - surface_share) * evaporated / depth[1]
+    surface = jnp.maximum(surface_asked, wilting[0])
+    deep = jnp.maximum(deep_asked, wilting[1])
+    unmet = ((surface - surface_asked) * depth[0]
+             + (deep - deep_asked) * depth[1]) * water_density / dt
+
+    # 3. Drainage of the water above the wilting point, implicit in it.
+    surface_excess = surface - wilting[0]
+    surface_kept = surface_excess / (1.0 + dt / tau[0])
+    into_deep = (surface_excess - surface_kept) * depth[0]
+    surface = wilting[0] + surface_kept
+    deep_excess = deep + into_deep / depth[1] - wilting[1]
+    deep_kept = deep_excess / (1.0 + dt / tau[1])
+    drained = (deep_excess - deep_kept) * depth[1]
+    deep = wilting[1] + deep_kept
+
+    # 4. Overflow above field capacity leaves the model.
+    surface_capped = jnp.minimum(surface, capacity[0])
+    deep_capped = jnp.minimum(deep, capacity[1])
+    overflow = ((surface - surface_capped) * depth[0]
+                + (deep - deep_capped) * depth[1]) * water_density / dt
+
+    new_water = jnp.where(
+        land[..., None], jnp.stack([surface_capped, deep_capped], axis=-1), 0.0)
+    deep_drainage = jnp.where(land, drained * water_density / dt, 0.0)
+    overflow = jnp.where(land, overflow, 0.0)
+    runoff = deep_drainage + overflow
+    land_area = (grid.cell_solid_angle * jcm_constants.rearth ** 2
+                 * grid.fractional_mask)
+    derived = BucketLandDerived.zeros(
+        grid.shape,
+        soil_water_availability=jnp.where(
+            land, soil_water_availability(new_water, params, vegetation_fraction), 0.0),
+        deep_drainage=deep_drainage,
+        soil_water_overflow=overflow,
+        runoff=runoff,
+        unmet_evaporation=jnp.where(land, unmet, 0.0),
+        runoff_mass_rate=jnp.sum(land_area * runoff),
+    )
+    return new_water, derived
+
+
 class BucketLandModel(SlabModelBase):
     """Two-layer leaky bucket of soil water under the atmosphere's own land.
 
     Only cells with some land (``grid.land_mask``) are integrated; the others
-    hold no water and report zeros. Each layer ``k`` holds a volumetric water
+    hold no water and report zeros. The physics below is
+    :func:`step_soil_water`, with the uniform ``params.vegetation_fraction``
+    as the deep layer's vegetation weighting. Each layer ``k`` holds a volumetric water
     content ``W_k`` over a depth ``d_k``, between its wilting point ``wp_k``
     and field capacity ``fc_k``. A coupling step of length ``dt`` applies, in
     turn:
@@ -252,7 +436,7 @@ class BucketLandModel(SlabModelBase):
         """
         super().__init__(name=name, grid=grid)
         self.params = BucketLandParameters.default() if params is None else params
-        _validate_parameters(self.params)
+        validate_bucket_parameters(self.params)
         if grid.cell_solid_angle is None:
             raise ValueError(
                 f"{name}: the grid carries no cell areas (SlabGrid.cell_solid_angle), "
@@ -282,26 +466,9 @@ class BucketLandModel(SlabModelBase):
         """Build the initial land carry; see the class docstring."""
         params = self._initial_params(params)
         land = self.grid.land_mask
-        wilting = params.soil_water_wilting_point
-        capacity = params.soil_water_field_capacity
-
-        if self.soil_water_climatology is not None:
-            target = jnp.clip(jnp.where(
-                land[..., None], self.soil_water_climatology, 0.0), 0.0, 1.0)
-            target = evaluate_cyclic_linear(self.start_year_fraction, target)
-            # Both layers at the same fraction ``s`` of their range give an
-            # availability of ``s * (d1 (fc1 - wp1) + veg d2 (fc2 - wp2)) /
-            # capacity``, so ``s`` follows from the target directly.
-            full = _available_water(
-                jnp.broadcast_to(capacity, self.grid.shape + (2,)), params)
-            reachable = jnp.sum(full, axis=-1) / _capacity(params)
-            fill = jnp.clip(target / jnp.where(reachable > 0.0, reachable, 1.0), 0.0, 1.0)
-        else:
-            fill = jnp.broadcast_to(
-                jnp.asarray(params.initial_soil_water_fill, dtype=float), self.grid.shape)
-
-        soil_water = jnp.where(
-            land[..., None], wilting + fill[..., None] * (capacity - wilting), 0.0)
+        soil_water = initial_soil_water(
+            land, params, params.vegetation_fraction,
+            self.soil_water_climatology, self.start_year_fraction)
         return {
             "params": params,
             "state": BucketLandState(soil_water),  # type: ignore[call-arg]
@@ -309,7 +476,8 @@ class BucketLandModel(SlabModelBase):
             "derived": BucketLandDerived.zeros(
                 self.grid.shape,
                 soil_water_availability=jnp.where(
-                    land, soil_water_availability(soil_water, params), 0.0),
+                    land, soil_water_availability(
+                        soil_water, params, params.vegetation_fraction), 0.0),
             ),
         }
 
@@ -317,68 +485,9 @@ class BucketLandModel(SlabModelBase):
         """Advance the soil water by one coupling step; see the class docstring."""
         params = carry["params"]
         forcing = carry["forcing"]
-        water = carry["state"].soil_water_content
-        land = self.grid.land_mask
-        dt = time.dt
-
-        depth = params.soil_bucket_depth
-        wilting = params.soil_water_wilting_point
-        capacity = params.soil_water_field_capacity
-        tau = params.drainage_timescale
-
-        # 1. Precipitation, into the surface layer.
-        surface = water[..., 0] + forcing.precipitation / WATER_DENSITY * dt / depth[0]
-        deep = water[..., 1]
-
-        # 2. Evaporation, shared by the water each layer can give; dew all to
-        # the surface layer. A layer is not taken below its wilting point.
-        available = _available_water(jnp.stack([surface, deep], axis=-1), params)
-        total = jnp.sum(available, axis=-1)
-        surface_share = jnp.where(
-            total > 0.0, available[..., 0] / jnp.where(total > 0.0, total, 1.0), 1.0)
-        evaporated = forcing.evaporation / WATER_DENSITY * dt
-        surface_share = jnp.where(evaporated < 0.0, 1.0, surface_share)
-        surface_asked = surface - surface_share * evaporated / depth[0]
-        deep_asked = deep - (1.0 - surface_share) * evaporated / depth[1]
-        surface = jnp.maximum(surface_asked, wilting[0])
-        deep = jnp.maximum(deep_asked, wilting[1])
-        unmet = ((surface - surface_asked) * depth[0]
-                 + (deep - deep_asked) * depth[1]) * WATER_DENSITY / dt
-
-        # 3. Drainage of the water above the wilting point, implicit in it.
-        surface_excess = surface - wilting[0]
-        surface_kept = surface_excess / (1.0 + dt / tau[0])
-        into_deep = (surface_excess - surface_kept) * depth[0]
-        surface = wilting[0] + surface_kept
-        deep_excess = deep + into_deep / depth[1] - wilting[1]
-        deep_kept = deep_excess / (1.0 + dt / tau[1])
-        drained = (deep_excess - deep_kept) * depth[1]
-        deep = wilting[1] + deep_kept
-
-        # 4. Overflow above field capacity leaves the model.
-        surface_capped = jnp.minimum(surface, capacity[0])
-        deep_capped = jnp.minimum(deep, capacity[1])
-        overflow = ((surface - surface_capped) * depth[0]
-                    + (deep - deep_capped) * depth[1]) * WATER_DENSITY / dt
-
-        new_water = jnp.where(
-            land[..., None], jnp.stack([surface_capped, deep_capped], axis=-1), 0.0)
-        deep_drainage = jnp.where(land, drained * WATER_DENSITY / dt, 0.0)
-        overflow = jnp.where(land, overflow, 0.0)
-        runoff = deep_drainage + overflow
-        land_area = (self.grid.cell_solid_angle * jcm_constants.rearth ** 2
-                     * self.grid.fractional_mask)
-        derived = BucketLandDerived.zeros(
-            self.grid.shape,
-            soil_water_availability=jnp.where(
-                land, soil_water_availability(new_water, params), 0.0),
-            deep_drainage=deep_drainage,
-            soil_water_overflow=overflow,
-            runoff=runoff,
-            unmet_evaporation=jnp.where(land, unmet, 0.0),
-            runoff_mass_rate=jnp.sum(land_area * runoff),
-        )
-
+        new_water, derived = step_soil_water(
+            carry["state"].soil_water_content, forcing.precipitation,
+            forcing.evaporation, time.dt, params, params.vegetation_fraction, self.grid)
         diagnostics = {
             "state": BucketLandState(new_water),  # type: ignore[call-arg]
             "forcing": forcing,
@@ -427,7 +536,11 @@ class BucketLandModel(SlabModelBase):
                 dims, forcing.precipitation, {
                     "long_name": "Precipitation the land was forced with",
                     **flux, "positive": "down", **role_attrs("forcing")}),
-            forcing_variable("evaporation"): (
+            # Written under the land tile's own name, the one the atmosphere
+            # publishes it by: a sea ice that solves its own energy balance
+            # is forced by the evaporation over the sea part, and a merge of
+            # the two datasets would collide on a name they shared.
+            forcing_variable("land_evaporation"): (
                 dims, forcing.evaporation, {
                     "long_name": "Evaporation over the land part of the cell "
                                  "the land was forced with",
@@ -435,7 +548,7 @@ class BucketLandModel(SlabModelBase):
         }
 
 
-def _validate_parameters(params: BucketLandParameters) -> None:
+def validate_bucket_parameters(params: BucketLandParameters) -> None:
     """Refuse parameters the bucket cannot integrate, naming the field."""
     def array(field):
         return np.asarray(getattr(params, field), dtype=float)

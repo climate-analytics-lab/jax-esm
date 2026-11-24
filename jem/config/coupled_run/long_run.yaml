@@ -3,14 +3,14 @@ defaults:
   - default
   - _self_
 
-# 3600 days = 120 whole chunks, so no chunk is short. `total_time` is a fixed
-# duration ("months" and "years" are refused); for a calendar end date set
-# `total_time=null` and `end_time=...`.
+# `total_time` is a fixed duration ("months" and "years" are refused); for a
+# calendar end date set `total_time=null` and `end_time=...`. 3600 days is
+# 120 chunks at `run_chunked`'s default chunk (30 days), so no chunk is short.
 total_time: "3600 days"
-# 30-day chunks: short enough that an unhealthy state is caught (and the run
-# restarts) without losing much, long enough that the per-chunk output and
-# recompilation cost stays negligible.
-chunk: "30 days"
+# `chunk` is `run_chunked`'s default, inherited rather than restated. A chunk
+# is what an unhealthy state is caught (and a restart made) at, and what one
+# output record spans below: short enough to lose little work, long enough
+# that the per-chunk output and recompilation cost stays negligible.
 # One record per chunk instead of every coupling step: at this length the
 # instantaneous stream is both huge and not what a climate is read from.
 #
@@ -25,7 +25,7 @@ chunk: "30 days"
 #       twelve bins -- every January of the run in one, a climatology;
 #   jem.accumulate.monthly_mean(coupler, total_time="3600 days")
 #       one bin per calendar month of the run (119 of them for this length,
-#       the first and last partial), which is the non-drifting equivalent of
+#       the last partial), which is the non-drifting equivalent of
 #       what `output_averages` gives here.
 output_averages: true
 # Nothing about checkpointing is set here: a run this long outlives a queue

@@ -83,9 +83,8 @@ config-group overrides — never as a standalone driver script:
    a `run.sh`).** A new runnable configuration is a named
    `jem/config/configuration/*.yaml` with a comment saying WHY each setting is
    what it is, or a notebook calling the Python API (`Coupler`, the component
-   classes, `run_chunked`). The bespoke drivers still under
-   `examples/02_experimental/` are legacy and are being folded into the Hydra
-   tree, not extended.
+   classes, `run_chunked`). `examples/02_experimental/` holds a notebook and a
+   README and no driver script; keep it that way.
  - **Python is the primary interface; config is a thin wrapper.** Every
    physical parameter and its default value lives once, as a Python default on
    the component class. YAML may carry only wiring (`_target_`, required
@@ -126,14 +125,15 @@ ocean GCM — into one JIT-compilable, end-to-end differentiable simulation loop
 - **Package name:** `jem`
 - **Python:** >= 3.11 (strict requirement; `X | Y` annotations)
 - **License:** MIT
-- **Status:** Alpha
+- **Status:** Beta (a pre-release of 1.0)
 
 The design in three sentences:
 
 - A **component** is any object satisfying the `Component` protocol in
   `jem/base/component.py`: a `name`, an `initialize() -> carry` and a
   `step(carry, time) -> (new_carry, diagnostics)`, plus the optional
-  capabilities `SupportsXarray`, `SupportsBind` and `SupportsCheckpoint`.
+  capabilities `SupportsXarray`, `SupportsBind`, `SupportsCheckpoint` and
+  `SupportsClockReset`.
   There is still no base class to inherit from — it is a runtime-checkable
   `typing.Protocol` — so an external model is adapted by a thin wrapper class
   rather than being rewritten or monkey-patched.
@@ -156,44 +156,53 @@ to add a component.
 jem/                             # Main package
 ├── __init__.py                  # exports the coupling core (Coupler, the protocols,
 │                                #   the exchangers, the output helpers, run_chunked)
-├── accumulate.py                # in-scan diagnostic reductions (monthly_mean)
+├── accumulate.py                # in-scan diagnostic reductions (monthly_mean, windowed_mean)
+├── adjoint.py                   # checkpointed_value_and_grad: gradients of long runs
 ├── checkpoint.py                # saving/loading a carry; the coupled directory layout
+├── configurations.py            # load(name) -> LoadedConfiguration: a named configuration
+│                                #   as built Python objects, no Hydra visible
 ├── constants.py                 # SurfaceConstants: what jcm.constants does not define
 ├── driver.py                    # run_chunked: THE chunked run loop, and its defaults
 ├── exchangers.py                # ExchangeSpec/Exchange + the standard coupling table
-├── main.py                      # `python -m jem.main`: the Hydra entry point
+├── fluxes.py                    # VerosExchange: the exchange a table cannot carry (wind stress)
+├── main.py                      # `python -m jem.main` (and the `jem` script): the Hydra entry point
 ├── output.py                    # postprocess / write_chunk: a chunk's files
+├── plot.py                      # the notebooks' shared plotting helpers (optional `plot` extra)
 ├── regrid.py                    # ESMFRegridders: the named maps a mixed-grid run uses
 ├── runners.py                   # composed config -> built objects -> run_chunked
 ├── config/                      # the Hydra config groups (wiring only, no defaults)
 │   ├── config.yaml              #   jcm's groups under `atmosphere`, plus jem's own
 │   └── <group>/*.yaml           #   ocean, land, seaice, coupling, regrid,
-│                                #   coupled_run, configuration
+│                                #   coupled_run, configuration (the named ones)
 ├── base/
 │   ├── component.py             # the contract: Component + optional capabilities,
 │   │                            #   CoupledCarry, CouplingTime, TimeAxis, Exchanger
 │   └── coupler.py               # Coupler — the coupled model, its clock and its step
 ├── components/
+│   ├── clock.py                 # how far a wrapped model's own clock may drift from the coupler's
 │   ├── jcm/                     # the JCM atmosphere (jax-gcm)
 │   │   ├── component.py         #   JCMComponent: wrapper class, threads the physics carry
 │   │   ├── contract.py          #   the pinned jax-gcm revision and every name JEM calls
-│   │   └── exchange_fields.py   #   SurfaceExchange: JCM's diagnostics -> JEM's conventions
-│   ├── jcm_component.py         # deprecated make_jem_compatible shim
+│   │   ├── exchange_fields.py   #   SurfaceExchange: JCM's diagnostics -> JEM's conventions
+│   │   └── forcing_window.py    #   restrict_forcing_to_window: keep only the records a run reads
 │   ├── veros_component.py       # VerosComponent, the Veros ocean GCM (optional dep)
+│   ├── veros/setups/            # importable Veros cases: double_drake, earth, global_latlon
 │   └── slab/
 │       ├── base.py              # SlabModelBase: grid, climatologies, xarray output
 │       ├── grid.py              # SlabGrid.from_coords / .from_scrip
 │       ├── slab_ocean_model/    # SlabOceanModel  (mixed layer, freeze/melt potential)
 │       ├── slab_seaice_model/   # SlabSeaiceModel (ice fraction diagnosed from SST)
 │       ├── bucket_land_model/   # BucketLandModel (soil water; the land's temperature is SPEEDY's)
+│       ├── slab_land_model/     # SlabLandModel (land temperature, snow, vegetation, albedo; the bucket's soil water)
 │       ├── winton_seaice_model/ # WintonSeaiceModel (thsice port: snow + two ice layers, frazil)
 │       └── slab_atmosphere_model/  # SlabAtmosphereModel (idealized, for tests)
 │           # each model directory holds a params.py: its flax.struct parameters
 ├── data/                        # packaged grids, masks and regridding weights
-└── utils/                       # cycles, esmf_regrid, idealized_distribution, ...
+├── tools/                       # idealised_terrain: terrain files of an idealised geography
+└── utils/                       # cycles, esmf_regrid, idealized_distribution, latlon_weights
 docs/                            # Sphinx documentation (RST + MyST, shibuya theme)
 ├── source/design/               # design documents (this is where they go)
-examples/                        # example notebooks and experimental setups
+examples/                        # example notebooks (01_basic, 02_experimental, 03_non_geoscience)
 tests/                           # tests/unit/ and tests/examples/
 ```
 
@@ -351,10 +360,18 @@ including the three whose value changed.
   (1 = all land). A cell can hold both surfaces: `land_mask` is
   `fractional_mask > 0` and `ocean_mask` is `fractional_mask < 1`, and each
   surface is forced by the atmosphere's flux over its own part of the cell
-  (the `sea_*` fields for an ocean), never by the grid-cell mean.
-- The land's temperature in a JCM run is the atmosphere's own (SPEEDY's slab
-  land, inside jax-gcm). A JEM land component (`BucketLandModel`) evolves
-  only the soil water, forced by the land tile's evaporation.
+  (the `sea_*` fields for an ocean, the `land_*` fields for a land), never by
+  the grid-cell mean.
+- Exactly one land evolves the land's temperature. By default it is the
+  atmosphere's own (SPEEDY's slab land, inside jax-gcm), and a
+  `BucketLandModel` (`land=bucket`) evolves only the soil water, forced by the
+  land tile's evaporation. A `SlabLandModel` (`land=slab`) evolves the
+  temperature itself, forced by the land tile's heat flux, and hands it to the
+  atmosphere as `stl_am`; the atmosphere's own land must then be *prescribed*
+  (`speedy_physics(land_model="prescribed")`, which `land=slab` sets), or two
+  slabs are warmed by the same flux. `jem.exchangers.check_land_coupling`
+  refuses that pairing, and both land models run the same soil-water code
+  (`jem.components.slab.bucket_land_model`).
 
 ### Output conventions
 A coupled run writes one dataset per component, and they are only useful
@@ -362,9 +379,15 @@ together if `xr.merge` aligns them rather than producing an outer join. The
 conventions are JCM's, and every component follows them:
 
 - **Dimensions** are `("time", "lon", "lat")` for a separable lon/lat grid, and
-  `("time", "x", "y")` with 2-D auxiliary `lat`/`lon` coordinates (plus a CF
-  `coordinates` attribute on each variable) for a curvilinear one — CF and
-  xarray forbid a 2-D variable named after one of its own dimensions.
+  `("time", "x", "y")` with 2-D auxiliary **`longitude`/`latitude`**
+  coordinates (plus a CF `coordinates` attribute on each variable) for a
+  curvilinear one — CF and xarray forbid a 2-D variable named after one of its
+  own dimensions, and the 2-D coordinates are *not* called `lon`/`lat` because
+  `xr.merge` of an atmosphere with a curvilinear component keeps the
+  atmosphere's 1-D `lon`/`lat` and silently drops the 2-D ones of the same
+  name. `jem.components.coordinates` defines both layouts for every component.
+  The `x`/`y` of two components on curvilinear grids of different shapes cannot
+  be merged (see `docs/source/design/output.md`).
 - **Coordinate values** are degrees computed as `radians * 180 / pi` in float64
   (`jem.components.slab.grid.to_degrees`), which is character for character what
   `jcm.utils.data_to_xarray` does. Any other route risks a last-bit difference,
@@ -386,6 +409,10 @@ conventions are JCM's, and every component follows them:
   the prefix the merge of their datasets collides on the shared name. A new
   output variable that comes from `carry["forcing"]` goes through
   `forcing_variable()`; one that comes from `state` or `derived` does not.
+  The prefix does not separate two *receivers* of the same flux over
+  different parts of a cell (a land and a Winton sea ice both take an
+  evaporation), so a land writes its tile's fluxes under the tile's name:
+  `forcing_land_evaporation`, `forcing_land_total_heat_flux`.
 - **Every variable is also tagged with its role**, `jem_role` — `state`,
   `derived` or `forcing` — by `jem.base.component.role_attrs(role)`, so that
   `ds.filter_by_attrs(jem_role="forcing")` answers the question without parsing

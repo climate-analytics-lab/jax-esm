@@ -19,11 +19,20 @@ def atm_ocn_exchange(components, time):
     del time
     atm, ocn = components["atm"], components["ocn"]
     ocn = dict(ocn, forcing=ocn["forcing"].replace(
-        total_heat_flux=atm["derived"].total_heat_flux))
+        total_heat_flux=atm["derived"].sea_total_heat_flux))
     atm = dict(atm, forcing=atm["forcing"].replace(
         sea_surface_temperature=ocn["state"].sea_surface_temperature))
     return dict(components, atm=atm, ocn=ocn)
 ```
+
+The ocean takes `sea_total_heat_flux`, the flux over the sea part of the
+cell, rather than `total_heat_flux`, the grid-cell mean (see *Each surface
+takes the flux over its own part of the cell* below).
+
+`examples/01_basic/02_aquaplanet_customized_initial_condition.ipynb` runs an
+aquaplanet through an exchanger written this way, with the sea ice's two
+fields added, and `tests/unit/test_notebook_equivalence.py` holds it to the
+standard table.
 
 Two rules, both enforced by what `lax.scan` will accept:
 
@@ -91,14 +100,27 @@ shaped differently can still be coupled, with a hand-written exchanger.
 | `atm.derived.land_evaporation` | `lnd.forcing.evaporation` |
 | `lnd.derived.soil_water_availability` | `atm.forcing.soilw_am` |
 
+A land that evolves its own temperature (`SlabLandModel`, {doc}`slab_land`)
+adds `SLAB_LAND_EXCHANGES` to this table, and to the Veros one:
+
+| source | destination |
+| --- | --- |
+| `atm.derived.land_total_heat_flux` | `lnd.forcing.total_heat_flux` |
+| `lnd.state.land_surface_temperature` | `atm.forcing.stl_am` |
+| `lnd.state.snow_cover` | `atm.forcing.snowc_am` |
+
 A row survives only if **both** its components are present, so an
 atmosphere/ocean pair gets two. A Winton sea ice ({doc}`winton_seaice`)
 replaces the first row with `WINTON_SEAICE_EXCHANGES`: it takes the
 atmosphere's state and its flux over the sea part, passes the ocean what it
 does not keep (`seaice.derived.ocean_heat_flux_up`), and hands the atmosphere
 its fraction and skin temperature. The land rows are the bucket's soil water
-({doc}`bucket_land`): the land tile's evaporation, never the cell mean, so
-`default_exchanges` refuses them under an atmosphere with no land tile. The wiring is by *name* — `("atm", "ocn",
+({doc}`bucket_land`) and, for a land with a temperature, its heat flux: the
+land tile's evaporation and heat flux, never the cell mean, so
+`default_exchanges` refuses them under an atmosphere with no land tile. It also
+refuses a `SlabLandModel` under an atmosphere that integrates its own land
+temperature, which would be a second slab warmed by the same flux
+(`check_land_coupling`). The wiring is by *name* — `("atm", "ocn",
 "lnd", "seaice")` — and a component registered under a name that just
 misses one of those (`ice`, `ocean`, `land`) is left unconnected with a
 warning, because the failure it would otherwise cause is silent: the sea ice
@@ -112,21 +134,35 @@ of the cell — not by the grid-cell mean, which also contains the land part's
 flux. The adapter reads them from the tiles jax-gcm's `SurfaceExchange`
 publishes, by tile name: SPEEDY's `sea` tile, or the fraction-weighted mean
 of a `water` and a `sea_ice` tile
-(`jem.components.jcm.exchange_fields.sea_tile`). The land part stays with
-the atmosphere: SPEEDY integrates its own slab land (`SpeedySurfaceFlux`'s
-default `land_model="slab"`, jax-gcm's `step_slab_land` after
-`land_model.f90`), forced by its own land tile, so no row carries the land's
-temperature; a land component (`land=bucket`) evolves only the soil water
-SPEEDY prescribes.
-SPEEDY's grid mean is exactly `(1 - land_fraction) * sea + land_fraction *
+(`jem.components.jcm.exchange_fields.sea_tile`). The land part goes to
+the land. By default that is the atmosphere's own: SPEEDY integrates its own
+slab land (`SpeedySurfaceFlux`'s default `land_model="slab"`, jax-gcm's
+`step_slab_land` after `land_model.f90`), forced by its own land tile, so no
+row carries the land's temperature, and a land component `land=bucket`
+evolves only the soil water SPEEDY prescribes. With `land=slab` the land's
+heat flux is a row too: `atm.derived.land_total_heat_flux`, the net heat flux
+over the land tile (positive upward), goes to `SlabLandModel`
+({doc}`slab_land`), which hands back the temperature and snow cover the
+atmosphere's prescribed land reads.
+
+**SPEEDY.** Its grid mean is `(1 - land_fraction) * sea + land_fraction *
 land`, so on one grid the ocean's share and the land's are disjoint and
-together are the cell's flux: no part of it is applied twice (#147). What the
-land does with its share is SPEEDY's: it holds its anomaly at zero on cells
-with less than `flandmin` of land, and its relaxation to the climatology is
-itself a source and a sink. A physics package that publishes no flux tiles (ECHAM's
-delivered fluxes) leaves the `sea_*` fields equal to the grid mean; the
-adapter warns about it at `initialize`, because an ocean on a coastal cell
-then also receives the land part's flux.
+together are the cell's flux: the ocean takes the sea part only and the land
+part stays with the land, which is SPEEDY's slab land or `SlabLandModel`.
+What SPEEDY's land does with its share is SPEEDY's: it holds its anomaly at
+zero on cells with less than `flandmin` of land, and its relaxation to the
+climatology is itself a source and a sink. `SlabLandModel` integrates every
+cell with any land and, relaxed to the climatology, has the same source and
+sink ({doc}`slab_land` lists the differences).
+
+**ECHAM.** It publishes no flux tiles (its delivered fluxes are untiled), so
+`sea_tile` finds none and the `sea_*` fields are equal to the grid-cell mean.
+An ocean on a coastal cell therefore also receives the land part's flux, and
+the double count on coastal cells is not removed for ECHAM. The adapter says
+so with a warning at `initialize`
+(`JCMComponent.publishes_sea_tiles` is `False`), and the couplings that need a
+tile refuse ECHAM outright: any land (`publishes_land_evaporation`) and
+the Winton sea ice (`publishes_sea_tiles`) raise in `default_exchanges`.
 
 **On another grid the sea fluxes are weighted by the sea part.** A plain
 conservative map averages every atmosphere cell an ocean cell overlaps by
@@ -151,23 +187,102 @@ takes the SST of the sea under it rather than a land cell's fill value, and
 it. A YAML `coupling.exchangers` table is taken as written: give its rows a
 `weight` to get the same.
 
-**Veros' mask is its own.** Veros decides its wet and dry columns from its
-own land–sea mask (land where the fraction is at least 0.5,
-`jem.components.veros.setups.earth`), and a wet column is wholly water,
-while the atmosphere's sea part is `1 - fmask` of its terrain. Where the two
-disagree, the weighted map hands a wet column the flux per unit of the
-atmosphere's sea area over all of the column, and the sea flux over a dry
-column reaches no water. For `veros-earth` (the packaged
-`terrain_JCM_T31.nc` against the rotated Gaussian ocean grid) that is
-0.375 sr of wet columns taking the sea flux over what the atmosphere counts
-as land (723 of 3018 wet columns have a mapped sea fraction below 0.99), and
-0.359 sr of the atmosphere's sea whose flux reaches no wet column (681 dry
-columns), against 8.98 sr of ocean: about 4 % each way, mostly cancelling in
-the global sum. Removing it means making the two masks agree -- deriving the
-atmosphere's land fraction from the ocean's wet mask, as CESM derives its
-surface fractions -- which is a change to the configuration's boundary data,
-not to the exchange. `veros-double-drake` uses one mask on one grid and is
-exact.
+**The two masks are one coastline, by construction.** Veros decides its wet
+and dry columns from its own land-sea mask (land where the ERA5 land fraction
+is at least 0.5, `jem.components.veros.setups.earth`), and a wet column is
+wholly water, while the atmosphere's sea part is `1 - fmask` of its terrain.
+Two independent files disagree: on the packaged `terrain_JCM_T31.nc` against
+the rotated Gaussian ocean grid, 0.375 sr of wet columns lay under what the
+atmosphere counted as land and took a sea flux it never exchanged (723 of 3018
+wet columns had a mapped sea fraction below 0.99), and 0.359 sr of the
+atmosphere's sea lay over dry columns (681 of them), against 8.98 sr of ocean:
+about 4 % each way. Worse, 110 of the 3404 sea-containing atmosphere cells
+(sea fraction 10-57 %, 15 of them tropical) had no wet column under the SST
+map at all, so `regrid_weighted` took the unweighted map of the ocean's SST,
+which over land holds Veros' fill value, and gave them 273.15 K for the whole
+run.
+
+`veros-earth` therefore makes the ocean's mask authoritative, the way CESM
+derives its surface fractions (`lfrac = 1 - ofrac`):
+`jem.tools.veros_earth_terrain.veros_earth_terrain` reads the wet mask the way
+the ocean does (same file, same threshold), maps it onto the T31 grid with the
+packaged *conservative* ocean-to-atmosphere weights (the ones `regrid=esmf`
+names `o2a_conserve`), and writes `lsm = 1 - ofrac` with the original file's
+orography. Each atmosphere cell's sea area is then exactly the wet Veros area
+under it (tested to round-off), and the file is packaged as
+`terrain_veros_earth_T31.nc`. Three consequences follow, and `VerosExchange`
+acts on them:
+
+- A cell with sea in it always overlaps a wet column, so the conservative map
+  covers it. The SST map is still bilinear (so it leaves no staircase), and a
+  bilinear stencil can miss a sliver of wet ocean (10 cells of 3324 on this
+  grid pair, none tropical): where the bilinear map reaches no wet column the
+  conservative, wet-weighted map takes over, so no sea cell is ever handed the
+  fill value (110 before, none after; `regrid_weighted` states what a cell
+  with no weight takes).
+- `VerosExchange.check_masks` raises if a cell has sea but no wet ocean
+  mapped under it, on the first coupled step (a host callback under a
+  `lax.cond` on `step == 0`, since the masks live in the carries and are
+  tracers inside the step), naming the count and the remedy: run the
+  atmosphere on a terrain file derived from the ocean's mask. A single-grid
+  exchange, with identity maps, has one shared mask and is exact:
+  `veros-double-drake` is unaffected.
+- jax-gcm reads a terrain file **by coordinate** (it interpolates the file
+  onto the model's Gaussian latitudes even when the file is on that grid), so
+  the new file's `lat` labels are JCM's own latitudes. The original
+  `terrain_JCM_T31.nc` labels its first and last rows -/+87.66 where JCM's are
+  -/+87.159 (a 0.5 degree error, so jax-gcm mixes 12 % of the neighbouring row
+  into each polar row: the orography of the southernmost row changes by up to
+  297 m, the northernmost by 56 m) and its other rows are off by up to 0.005
+  degrees; its values are on the T31 grid by index. Read through jax-gcm, the
+  new file's orography is unchanged to float32 round-off.
+
+What the agreement does not remove:
+
+- **jax-gcm rounds the land fraction.** `jcm.terrain.get_terrain` sets an
+  `lsm` within 0.1 of 0 or 1 to exactly 0 or 1. The atmosphere's sea area is
+  therefore the wet area to 0.1 per cell, not to round-off: 0.014 sr of
+  atmosphere sea is dropped (cells with under 10 % sea) and 0.015 sr added
+  (cells with over 90 %), against 8.98 sr of ocean, and they nearly cancel
+  (the sea areas differ by 1.6e-4 of the ocean's).
+- **The flux map conserves to about half a percent, not exactly.** The
+  fluxes are normalised by the sea fraction mapped onto each ocean column
+  (`R(s F) / R(s)`), which keeps a coastal column from being diluted by the
+  land beside it but cannot match the heat the atmosphere gave up column by
+  column: the flux handed to the dry columns beside the coast (5 % of the
+  total on day 1 of a `veros-earth` run) is nearly, not exactly, what the
+  normalisation adds back. The sea-tile heat the atmosphere gives up and the
+  heat the ocean receives differed over a 30-day run by -1.13 W m-2 of ocean
+  on average before (always the same sign, up to 1.8) and -0.16 W m-2 after
+  (alternating, at most 0.38; 0.27 in mean absolute value), against a mean
+  flux of 60-90 W m-2. An exactly conservative alternative exists now that the
+  masks agree: hand a wet column `wet * R(s F / ofrac)`, where `ofrac` is the
+  conservative map of the wet mask, which closes the heat budget to 2e-16 on a
+  day's real fluxes but dilutes columns beside the cells JCM rounds to land;
+  it is not what the exchange does. The rounding is the cause of both
+  shortcomings: jax-gcm makes a cell with at most a tenth of land all sea and
+  one with at most a tenth of sea all land when it builds the terrain, so wet
+  columns under a cell rounded to land have no sea tile above them. With
+  that threshold at 0 (jax-gcm's `terrain.fmask_threshold`, which the pinned
+  revision does not have yet) the plain conservative map is exact and gives
+  every wet column a flux; jax-esm#164 tracks the change.
+- **The atmosphere's land data describe the old coastline.** `veros-earth`
+  takes its albedo, snow, soil water and land temperature from jax-gcm's
+  `bc/t30/clim/forcing.nc`, defined for the original coast. 417 cells gain land
+  fraction (0.205 sr of new land, against 3.6 sr of land, so 5.7 %; a mean of
+  0.20 of a cell; 8 cells by more than 0.5), and 410 lose it (0.222 sr). The
+  new land takes the file's mixed coastal values, an albedo of 0.13 where its
+  nearest land neighbours have 0.21 and a soil water availability of 0.52
+  where they have 0.73: about 0.001 of global-mean albedo, or 0.5 W m-2 of
+  absorbed shortwave if all of it were wrong, for the whole new coast. Sea
+  ice, which the atmosphere reads from the same file, is 0.38 in the cells
+  that turn to sea poleward of 55 degrees where the nearest sea has 0.48. The
+  orography of a cell that turns from mostly land to mostly sea is kept (the
+  worst is 1341 m, Andes coast at 31.5 S, land fraction 0.58 to 0.21), so a
+  small area of sea sits under a raised surface. A matching forcing file, with
+  land fields extended into the new land from their nearest land neighbours
+  and sea ice into the new sea, would remove the first and the third; it is
+  not part of this change.
 
 **The freezing point is an energy-budget decision.** The slab sea ice
 diagnoses its fraction from the SST and has no energy budget, so it takes no
@@ -207,6 +322,34 @@ It therefore goes through a hand-written exchanger,
 configurations — which also applies the sea-ice mask, a condition rather
 than a copy. The declarative table above carries the rest of the coupling.
 
+**A sea ice under a Veros ocean** goes through the same hand-written exchanger.
+`VerosExchange` makes the sea-ice rows of the Veros table itself, by running
+them through `jem.exchangers.table_specs` and `Exchange`, so they are weighted
+and regridded exactly as `default_exchanges` would (the atmosphere's fluxes by
+its sea fraction, the ice's fraction by its own sea part, its skin temperature
+by its ice area). Which rows depends on the ice's carry:
+
+- a Winton ice (`VEROS_WINTON_SEAICE_EXCHANGES`) is forced from the
+  atmosphere's state, given the ocean's SST and the freeze/melt energy
+  `ocn.derived.ice_frazil_melt_energy`, hands the atmosphere its fraction and
+  skin temperature, and passes the ocean its heat and freshwater flux
+  (`forcing.heat_flux`, `forcing.freshwater_flux`) **in place of** the
+  atmosphere's sea-tile fluxes. The swamp mask is not applied, because there is
+  a real ice to take the deficit. The ocean has to clamp
+  (`VerosComponent(clamp_at_freezing=True)`);
+- the SST-diagnosed slab ice (`VEROS_SLAB_SEAICE_EXCHANGES`) takes the SST and
+  hands the atmosphere its fraction; it has no energy budget, so the ocean keeps
+  its own fluxes and the swamp mask, and a clamping ocean is refused.
+
+`VerosExchange.validate` refuses the mismatched pairs, and an ice whose sea
+fraction differs from Veros' wet mask: the ice and the ocean have to be on one
+sea, which for the packaged Earth grid means the ice's `land_fraction_file` is
+the binary mask `jem.tools.veros_earth_ice_mask` writes. Because
+`VerosExchange` is a function, the atmosphere fields it writes
+(`sea_surface_temperature`, `sice_am`, and `sea_ice_temperature` for a Winton
+ice) must be listed in `coupling.exchanged_forcing`. See {doc}`winton_seaice`
+for the clamp and its limits.
+
 The ocean takes the atmosphere's stress rather than applying a drag law of
 its own to the near-surface wind (jax-esm#132). The published stress is the
 one the atmosphere column received, stability-corrected and averaged over the
@@ -216,10 +359,10 @@ to stability, applied to a wind whose reference height differs between
 physics packages (SPEEDY's lowest model level, ECHAM's 10 m), so the ocean's
 forcing would change with the atmosphere package for a reason unrelated to
 the ocean. It would also be applied to the interval-mean wind, and the drag
-of a mean wind is smaller than the mean drag. On the `veros-double-drake`
-configuration after 30 days, the published stress over open ocean is about
-1.6 times the old `Cd = 1e-3` law's (RMS), with the same sign everywhere and
-a pattern correlation of 0.92.
+of a mean wind is smaller than the mean drag. Measured on the
+`veros-double-drake` configuration after 30 days, the published stress over
+open ocean is about 1.6 times that of a constant-drag law with `Cd = 1e-3`
+(RMS), with the same sign everywhere and a pattern correlation of 0.92.
 
 Three properties are worth stating, because a hand-written exchanger has
 them only by accident:
@@ -267,6 +410,42 @@ themselves (and the weight files built from them, shipped under `jem/data/`)
 are generated by [EarthSystemGrids.py](https://github.com/meteorologytoday/EarthSystemGrids.py),
 a separate offline tool this project does not depend on at runtime.
 
+### Checks that stop a wrong-grid exchange
+
+A copy between two grids that happen to have the same shape is exactly the
+mistake `lax.scan` cannot see: the packaged `veros-earth` pair, JCM's T31 grid
+and the ocean's rotated grid, are both 96 x 48, so a row with no regridder
+would copy index for index between two different geographies and run happily.
+Four checks close that, each at a different point:
+
+- **`Exchange.validate` compares shapes with the row.** A row that names a
+  regridder must read a field of the regridder's `src_shape` and write one of
+  its `dst_shape`; a row with no regridder is a copy, so its two ends must be
+  the same shape. Only a field that is a single array has a shape to compare
+  (a `TimeSeries` is skipped), and a regridder with no `src_shape`/`dst_shape`
+  attributes, such as a plain callable, is not checked. Dtypes are not
+  compared, because `Exchange` casts to the destination's.
+- **`default_exchanges` refuses a half-mapped mixed-grid table.** Giving any
+  `regrid` entry says the run is mixed-grid, so every row that crosses between
+  the atmosphere's grid and the ocean's (`ocn` and `seaice` are on the ocean's
+  grid) must find a regridder, by its `a2o_flux`-style key or its bare
+  direction. A crossing row left without one raises `ValueError` naming the
+  missing keys. Passing no `regrid` at all is valid and means every component
+  shares one grid. This is the check for the case a shape comparison cannot
+  see, equal shapes on different grids.
+- **The default Veros table is a warning.** When the ocean is a
+  `VerosComponent` and no exchanger was named, `default_exchanges` selects
+  `VEROS_OCEAN_EXCHANGES`, which only copies fields: the ocean gets the heat
+  and freshwater fluxes but no wind stress and no sea-ice mask on its fluxes.
+  That is logged at WARNING, naming `jem.fluxes.VerosExchange` as the exchanger
+  for a mechanically forced ocean.
+- **`ESMFRegridder` checks its input and keeps its precision.** A field that
+  is not of the weights' `src_shape` (for instance a transposed one) is a
+  `ValueError` rather than a gather with out-of-range or reordered indices.
+  The weights are float64 when `jax_enable_x64` is on, so a float64 field is
+  not mapped through float32 weights, and float32 otherwise; the result is
+  cast back to the field's own dtype.
+
 ### Coupling is lagged
 
 None of this changes *when* fields move, and with the default workflow the
@@ -290,4 +469,4 @@ exchange is lagged by one coupling step. With `["exchange", "atm", "ocn"]`:
   fluxes from the same step, at the cost of giving the atmosphere a
   two-step-old SST. Neither order gives every component same-step
   information; that needs an iterated (implicit) exchange or a partitioned
-  workflow, which is a follow-up.
+  workflow, and no packaged workflow does either.

@@ -23,30 +23,26 @@ notebook's construction" is defined precisely as:
    call after it (which the notebook legitimately calls with its own
    ``total_time``/``chunk``/``output_dir``/... -- run *settings*, not
    construction).
-2. Apply exactly three substitutions to that prefix:
+2. Apply exactly two substitutions to that prefix:
 
    - the import line gains ``SlabSeaiceModel``, and the ``components`` dict
      gains a ``"seaice": SlabSeaiceModel(grid, name="seaice")`` entry
      (written as a multi-line dict literal purely for line length), both
      required by adding the sea-ice component ``python_api.md``'s pair-only
-     example leaves out;
-   - the ``Model(...)`` call gains an explicit ``time_step=12`` (minutes),
-     with a comment explaining why: without it, ``Model`` picks the
-     physics' own stable time step (30 minutes for SPEEDY T31L8) rather
-     than the ``+configuration=aquaplanet-slab`` recipe's actual step
-     (``atmosphere.run.time_step``, 12 minutes, from jax-gcm's
-     ``run/default.yaml`` -- the recipe never overrides ``atmosphere.run``).
-     ``python_api.md``'s own worked example is a standalone construction
-     with no configuration to match, so it is not wrong to leave this
-     implicit there; this notebook explicitly claims to run the same model
-     as ``+configuration=aquaplanet-slab``, and that claim would be false at
-     the physics level (a materially different time step) without this
-     substitution -- ``tests/unit/test_notebook_equivalence.py``
-     verifies the claim holds, ``dt`` included.
+     example leaves out.
+
+   The ``Model(...)`` call is NOT substituted: given no ``time_step`` it takes
+   SPEEDY T31L8's stable step capped at 30 minutes, which is the step
+   ``+configuration=aquaplanet-slab`` runs at (the ``speedy-t31`` bundle's
+   ``run.time_step``), so the notebook and the configuration agree on ``dt``
+   without stating it -- ``tests/unit/test_notebook_equivalence.py`` verifies
+   that. They do not agree on the SPEEDY parameters: the configuration runs
+   jax-gcm's coupled-calibrated set, the plain ``Model(...)`` SPEEDY's
+   reference values, and the notebook says so.
 
 The notebook's own code cell that builds ``coupler`` (identified as the one
 whose source contains ``"coupler = Coupler("``) must equal the result of
-these three substitutions byte for byte. If ``python_api.md``'s block
+these two substitutions byte for byte. If ``python_api.md``'s block
 changes (the #878 clock migration's ``start_date`` -> ``start_time``
 rename, for instance), this test fails until the notebook's construction
 cell is updated to match -- which is the whole point: the two are pinned
@@ -63,9 +59,9 @@ from tests.unit.test_readme_quickstart import PYTHON_API, _first_python_block
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOK = REPO_ROOT / "examples" / "01_basic" / "01_aquaplanet.ipynb"
 
-#: The three substitutions that turn `python_api.md`'s atmosphere/ocean-only,
+#: The two substitutions that turn `python_api.md`'s atmosphere/ocean-only,
 #: configuration-free prefix into what the notebook must build. Each is
-#: applied exactly once; see the module docstring for why these three.
+#: applied exactly once; see the module docstring for why these two.
 _OLD_IMPORT = "from jem.components import JCMComponent, SlabOceanModel\n"
 _NEW_IMPORT = "from jem.components import JCMComponent, SlabOceanModel, SlabSeaiceModel\n"
 _OLD_COMPONENTS = 'components = {"atm": atm, "ocn": SlabOceanModel(grid)}\n'
@@ -76,25 +72,8 @@ _NEW_COMPONENTS = (
     '    "seaice": SlabSeaiceModel(grid, name="seaice"),\n'
     '}\n'
 )
-_OLD_MODEL = (
-    "# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.\n"
-    "atm_model = jcm.model.Model(coords=get_speedy_coords(), start_time=start_date)\n"
-)
-_NEW_MODEL = (
-    "# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.\n"
-    "# `time_step=12` (minutes) is the step `+configuration=aquaplanet-slab`\n"
-    "# actually runs at -- jax-gcm's `run/default.yaml`, composed at\n"
-    "# `atmosphere.run.time_step` -- and has to be given explicitly: with no\n"
-    "# `time_step`, `Model` instead picks the physics' own stable step (30\n"
-    "# minutes for SPEEDY T31L8), a materially different model than the one\n"
-    "# this notebook claims to reproduce.\n"
-    "atm_model = jcm.model.Model(\n"
-    "    coords=get_speedy_coords(), start_time=start_date, time_step=12\n"
-    ")\n"
-)
 _SUBSTITUTIONS = (
     (_OLD_IMPORT, _NEW_IMPORT),
-    (_OLD_MODEL, _NEW_MODEL),
     (_OLD_COMPONENTS, _NEW_COMPONENTS),
 )
 

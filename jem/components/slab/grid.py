@@ -47,7 +47,7 @@ def to_degrees(radians) -> np.ndarray:
     (``jcm.utils.data_to_xarray``), so a slab dataset must too: a last-bit
     difference in a coordinate value is enough for ``xr.merge`` to treat the
     two grids as different axes and produce a 119-point longitude union out of
-    two 96-point grids, which is exactly what happened before this existed.
+    two 96-point grids.
     """
     return np.asarray(radians, dtype=np.float64) * 180.0 / np.pi
 
@@ -293,9 +293,10 @@ class SlabGrid:
         reader: only SCRIP files with ``grid_rank == 2`` are supported.
         ``grid_dims = [n_lon, n_lat]`` already matches SlabGrid's convention;
         per-cell fields are stored flat in Fortran order (longitude varies
-        fastest) within that shape. Only ``grid_center_lat``/``grid_center_lon``
-        and ``grid_imask`` are read; ``grid_corner_*`` and ``grid_area`` exist
-        for computing regridding weights, which the slab models do not do.
+        fastest) within that shape. Only ``grid_center_lat``/``grid_center_lon``,
+        ``grid_imask`` and, when present, ``grid_area`` (kept as the cell
+        solid angle) are read; ``grid_corner_*`` exist for computing regridding
+        weights, which the slab models do not do.
 
         Parameters
         ----------

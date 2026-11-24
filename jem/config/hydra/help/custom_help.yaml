@@ -8,6 +8,12 @@ app_name: JEM
 # which `string.Template` renders as `${`. Written any other way, `--help`
 # either prints this machine's absolute paths in place of the example or
 # aborts with "Invalid placeholder in string".
+#
+# The group listing is two lines of machinery: Hydra fills $APP_CONFIG_GROUPS
+# with the groups of THIS package (`ocean`, `seaice`, ...), but not with the
+# groups on the `pkg://jcm.config` search-path entry, so jax-gcm's are listed
+# by the `${jcm_groups:}` resolver (jem/config/__init__.py), which OmegaConf
+# resolves in the first pass.
 
 
 template: |
@@ -41,6 +47,12 @@ template: |
     the atmosphere's own run config and a ``run`` group here would shadow
     JAX-GCM's.
 
+    The process's JAX precision is the top-level key ``jax_enable_x64``: the
+    default (null) leaves it as the process has it (float32); ``true`` runs
+    the whole model in double precision (``jax_enable_x64=true``); ``false``
+    forces float32. ``ocean=veros`` selects ``true`` itself, since Veros
+    cannot run in single precision.
+
   The atmosphere: JAX-GCM's own config groups, re-rooted under `atmosphere`:
   -------------------------------------------------------------------------
     physics, grid, dycore, run, init, terrain, forcing, nudging, diffusion
@@ -48,22 +60,39 @@ template: |
     Group and option names are JAX-GCM's; the package is spelled out in the
     override, and single keys are addressed under ``atmosphere.``:
 
-      python -m jem.main physics@atmosphere.physics=held_suarez \
-          grid@atmosphere.grid=held_suarez_t31_l8 atmosphere.run.time_step=15
+      python -m jem.main diffusion@atmosphere.diffusion=strong \
+          atmosphere.run.time_step=15
+
+    The physics package has to publish surface fluxes to be coupled (SPEEDY,
+    the default, and ECHAM do; ``held_suarez`` resolves none and is refused
+    when the model is built), and the atmosphere's timestep, in minutes, has
+    to divide the coupling timestep.
 
     A whole JAX-GCM configuration bundle composes under the atmosphere with
     the group's package, and command-line overrides still apply on top:
 
       python -m jem.main +configuration@atmosphere=speedy-t31 \
-          atmosphere.run.time_step=7
+          atmosphere.run.time_step=15
 
     Spell the ``@atmosphere`` part: ``+configuration=speedy-t31`` without it
-    would compose that bundle at the *root*, where its `physics`, `terrain`
-    and `run` keys are not the atmosphere's and nothing would read them.
+    asks for that bundle at the *root*, where there is no `physics` group
+    for it to override, and Hydra refuses it ("Could not override 'physics'.
+    Did you mean to override physics@atmosphere.physics?").
 
   Files shipped with the packages can be named without a machine-specific
   path -- in single quotes, so that the shell leaves the ``$\${...}`` for
   Hydra to resolve: ``ocean.sst_clim_file='$\${jcm_data:bc/t30/clim/forcing.nc}'``,
   ``+ocean.grid_file='$\${jem_data:JCM_T31.SCRIP.nc}'``.
+
+  Config groups and their options:
+  --------------------------------
+  JAX-ESM's own groups, ``group: option, option, ...`` (``coupled_run=long_run``):
+
+  $APP_CONFIG_GROUPS
+  JAX-GCM's groups, re-rooted under the atmosphere, so each is overridden with
+  the package spelled out (``physics@atmosphere.physics=echam``); the
+  ``+configuration@atmosphere`` line is its whole-bundle group:
+
+  ${jcm_groups:}
 
   See the project README for runnable examples and the most common overrides.

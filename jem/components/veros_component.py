@@ -15,7 +15,6 @@ handed it. That is done once, in the constructor, and said out loud there.
 import importlib
 import logging
 import os
-import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,10 +23,12 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import tree_math
 import xarray as xr
 from veros import runtime_settings
 
+from jem import constants
 from jem.base.component import (
     Carry,
     CouplingTime,
@@ -40,6 +41,13 @@ from jem.checkpoint import CARRY_FILENAME
 from jem.checkpoint import load as load_pytree
 from jem.checkpoint import save as save_pytree
 from jem.components.clock import clock_tolerance_seconds
+from jem.components.coordinates import (
+    CURVILINEAR_DIMS,
+    SEPARABLE_DIMS,
+    curvilinear_coordinates,
+    geolocate,
+    separable_coordinates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +63,14 @@ GHOST_CELLS = 2
 SEAWATER_HEAT_CAPACITY = 3991.86795711963  # J kg-1 K-1
 REFERENCE_SALINITY = 35.0  # PSU
 
-# ``sqrt`` has an infinite derivative at 0, so AD through ``sqrt(x)`` blows
-# up to NaN as x -> 0 even though the primal value stays finite. The TKE
-# surface forcing floors the *squared* stress magnitude -- sqrt's argument --
-# at this value squared, which bounds sqrt and its derivative and caps the
-# resulting magnitude from below.
+# ``sqrt`` has an infinite derivative at 0, so AD through ``sqrt(x)`` gives
+# NaN at exactly zero stress (``inf * 0``) even though the TKE surface forcing
+# itself, ``|tau / rho_0| ** 1.5``, is smooth there. The forcing therefore
+# floors the stress magnitude at this value before taking the root. It is a
+# stress in N m-2 and is divided by ``rho_0`` where it is applied, like the
+# stress it is compared with: three orders of magnitude below a typical wind
+# stress (0.1 N m-2), so it guards the derivative without setting the forcing
+# anywhere the wind blows.
 MIN_STRESS_MAGNITUDE = 1e-3  # N m-2
 
 #: Name of the HDF5 restart file :meth:`VerosComponent.save_carry` writes
@@ -89,7 +100,7 @@ def configure_veros_runtime() -> None:
     therefore have to be applied before *anything* in the process imports
     ``veros.core`` -- including a user's own ``VerosSetup`` module. That is
     why this module calls it at import time: importing
-    ``jem.components.veros_component`` (or ``jem.components.Veros``) is the
+    ``jem.components.veros_component`` is the
     documented way to make Veros JAX-backed, and it must come before the
     setup module is imported.
 
@@ -105,6 +116,22 @@ def configure_veros_runtime() -> None:
     the atmosphere's included, onto the CPU of a GPU host. An explicit
     ``VEROS_DEVICE`` environment variable is Veros' own way of choosing a
     device and is honoured as given.
+
+    What it does **not** set is JAX's precision. Veros runs in float64 and
+    switches the process-global ``jax_enable_x64`` on when ``veros.core`` is
+    first imported -- a different, later moment than this call, and one that
+    is reached only when a Veros setup is built. This function deliberately
+    flips nothing: it runs at import time, and importing this module (a test
+    collecting it, a docs build) must not change the precision of a process
+    that never builds a Veros model. The precision of a coupled run is
+    therefore decided *before* any component is built, by the configuration
+    (``jax_enable_x64``, which ``ocean=veros`` selects; see
+    :func:`jem.runners.apply_precision`), so the atmosphere is allocated in the
+    precision it will be stepped in. A caller who builds the components in
+    Python, without the runner, must call
+    ``jax.config.update("jax_enable_x64", True)`` before constructing the
+    atmosphere; building a Veros model after an atmosphere built in float32
+    leaves a model whose arrays are a mix of both.
 
     Raises
     ------
@@ -219,23 +246,143 @@ class VerosDerived:
     weighted by (:func:`jem.exchangers.regrid_weighted`), so an atmosphere
     cell takes the SST of the water under it and nothing of the land
     columns' fill value.
+
+    ``ice_frazil_melt_energy`` is the slab ocean's freeze/melt potential, CESM's
+    ``frzmlt`` (J m-2 over one coupling step), of the top cell: positive is the
+    heat a clamp at the freezing point added, which a sea ice must turn into
+    ice; negative is heat above freezing, available to melt ice from below.
+    It is zero on land. It is published whether or not the ocean clamps; only a
+    clamping ocean has *removed* the positive part from its own temperature
+    (:class:`VerosComponent`, ``clamp_at_freezing``).
+
+    ``clamps_at_freezing`` is that static configuration flag (1.0 or 0.0, a
+    scalar), carried so that an exchanger, which sees only carries, can
+    refuse a sea ice that forms ice from ``ice_frazil_melt_energy`` over an
+    ocean that kept the deficit (or the converse) when the coupled model is
+    validated.
     """
 
     sea_surface_temperature: jnp.ndarray
     sea_surface_u: jnp.ndarray
     sea_surface_v: jnp.ndarray
     sea_fraction: jnp.ndarray
+    ice_frazil_melt_energy: jnp.ndarray
+    clamps_at_freezing: jnp.ndarray
 
     @classmethod
     def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None,
-              sea_surface_v=None, sea_fraction=None):
+              sea_surface_v=None, sea_fraction=None, ice_frazil_melt_energy=None,
+              clamps_at_freezing=None):
         """Zero-filled derived fields on a ``shape`` horizontal grid."""
         return cls(
             sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape) + 273.15,
             sea_surface_u if sea_surface_u is not None else jnp.zeros(shape),
             sea_surface_v if sea_surface_v is not None else jnp.zeros(shape),
             sea_fraction if sea_fraction is not None else jnp.zeros(shape),
+            ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
+            clamps_at_freezing if clamps_at_freezing is not None else jnp.zeros(()),
         )
+
+
+#: How far, in degrees, a setup's declared 1-D output axes (see
+#: :class:`VerosComponent`) may differ from Veros' own ``xt``/``yt``. A
+#: declaration is a *label*: it must never move a cell. Veros rebuilds its
+#: centres by cumulative sums, which differ from any other construction of the
+#: same axis by ~1e-13 degrees (round-off, and the reason a label is needed at
+#: all, since ``xr.merge(join="exact")`` compares bits); 1e-6 degrees is ~0.1 m,
+#: seven orders of magnitude above that and far below anything that changes a
+#: metric term, while a declared axis that is a different grid -- shifted by half
+#: a cell, or another resolution's -- is off by orders of magnitude more.
+_DECLARED_AXIS_TOLERANCE_DEGREES = 1e-6
+
+
+def _geographic_coordinates(
+    model: Any, horizontal_shape: tuple[int, int]
+) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+    """Return a setup's declared true 2-D ``(longitude, latitude)``, or ``(None, None)``.
+
+    Read from the setup's ``geographic_longitude``/``geographic_latitude``
+    attributes (see :class:`VerosComponent`). Declaring one without the other,
+    or on a different shape from the grid, is a mistake in the setup and is
+    refused here rather than written into every output file.
+    """
+    longitude = getattr(model, "geographic_longitude", None)
+    latitude = getattr(model, "geographic_latitude", None)
+    if longitude is None and latitude is None:
+        return None, None
+    if longitude is None or latitude is None:
+        raise ValueError(
+            f"{type(model).__name__} declares only one of geographic_longitude"
+            " and geographic_latitude; a rotated grid needs both."
+        )
+    longitude = np.asarray(longitude, dtype=np.float64)
+    latitude = np.asarray(latitude, dtype=np.float64)
+    for label, values in (("geographic_longitude", longitude),
+                          ("geographic_latitude", latitude)):
+        if values.shape != tuple(horizontal_shape):
+            raise ValueError(
+                f"{type(model).__name__}.{label} has shape {values.shape}, but"
+                f" the interior T grid is {tuple(horizontal_shape)}."
+            )
+    return longitude, latitude
+
+
+def _geographic_axes(
+    model: Any,
+    native_longitude: np.ndarray,
+    native_latitude: np.ndarray,
+    coordinates_in_degrees: bool,
+) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+    """Return a setup's declared 1-D output axes, or ``(None, None)``.
+
+    Read from the setup's ``geographic_longitude_axis`` /
+    ``geographic_latitude_axis`` attributes (see :class:`VerosComponent`).
+    The declared axes only *rename the values* the output is labelled with, so
+    they are refused unless they are Veros' own ``xt``/``yt`` to within
+    :data:`_DECLARED_AXIS_TOLERANCE_DEGREES`: an axis that moved a cell would
+    mislabel every field in the file. Declaring one axis without the other, an
+    axis of the wrong length, or axes for a grid whose coordinates are metres
+    is refused as a mistake in the setup.
+    """
+    name = type(model).__name__
+    longitude = getattr(model, "geographic_longitude_axis", None)
+    latitude = getattr(model, "geographic_latitude_axis", None)
+    if longitude is None and latitude is None:
+        return None, None
+    if longitude is None or latitude is None:
+        raise ValueError(
+            f"{name} declares only one of geographic_longitude_axis and"
+            " geographic_latitude_axis; an output grid needs both."
+        )
+    if not coordinates_in_degrees:
+        raise ValueError(
+            f"{name} declares geographic output axes, but its grid is"
+            " Cartesian (settings.coord_degree is False): its coordinates are"
+            " metres and have no longitude or latitude to label them with."
+        )
+    axes = []
+    for label, declared, native in (
+        ("geographic_longitude_axis", longitude, native_longitude),
+        ("geographic_latitude_axis", latitude, native_latitude),
+    ):
+        values = np.asarray(declared, dtype=np.float64)
+        if values.shape != native.shape:
+            raise ValueError(
+                f"{name}.{label} has shape {values.shape}, but Veros' axis is"
+                f" {native.shape}."
+            )
+        departure = float(np.max(np.abs(values - native)))
+        if not departure <= _DECLARED_AXIS_TOLERANCE_DEGREES:
+            raise ValueError(
+                f"{name}.{label} differs from Veros' own axis by {departure:g}"
+                f" degrees, more than the {_DECLARED_AXIS_TOLERANCE_DEGREES:g}"
+                " allowed: a declared axis only relabels the cells' round-off,"
+                " it must not move them. A grid whose cells are elsewhere than"
+                " Veros' axes say is a 2-D geographic_longitude/"
+                "geographic_latitude declaration instead."
+            )
+        axes.append(values)
+    return axes[0], axes[1]
 
 
 class VerosComponent:
@@ -252,19 +399,67 @@ class VerosComponent:
     model : veros.VerosSetup
         A Veros setup on which ``setup()`` has already been called, so
         ``model.state`` holds the allocated grid and initial conditions
-        this wrapper reads its geometry from.
+        this wrapper reads its geometry from. What the output's horizontal
+        coordinates are labelled with is the setup's to declare, as one of:
+
+        * nothing: the dataset is written on ``("lon", "lat")`` with Veros'
+          own T-grid axes ``xt``/``yt``;
+        * ``geographic_longitude_axis`` and ``geographic_latitude_axis``:
+          1-D arrays in degrees, shapes ``(nx,)`` and ``(ny,)``. The dataset
+          is still on ``("lon", "lat")`` but labelled with these values, which
+          must be Veros' own axes to within 1e-6 degrees (a label must not
+          move a cell; anything further is refused). Veros rebuilds ``xt``/
+          ``yt`` by cumulative sums, so they differ in the last bits from
+          another component's axis even when both describe one grid; declaring
+          that component's own axis, bit for bit, is what lets
+          ``xr.merge(join="exact")`` of the two datasets succeed;
+        * ``geographic_longitude`` and ``geographic_latitude``: 2-D arrays in
+          degrees on the interior T grid, shape ``(nx, ny)``, for a grid whose
+          lines are not meridians and parallels (a rotated or displaced pole).
+          The dataset is written on index dimensions ``("x", "y")`` with 2-D
+          ``longitude``/``latitude`` coordinates (see
+          ``jem.components.coordinates``) and Veros' own axes are kept as
+          ``native_lon``/``native_lat``.
+
+        Declaring the 1-D and the 2-D form together is refused.
+    clamp_at_freezing : bool, optional
+        Whether the top cell is held at the seawater freezing point
+        (``jem.constants.seawater_freezing_point_K``) once per coupling
+        step, with the heat that took published as
+        ``derived.ice_frazil_melt_energy`` for a sea ice to turn into ice --
+        what :class:`~jem.components.slab.slab_ocean_model.slab_ocean_model.SlabOceanModel` does under
+        ``params.clamp_at_freezing`` and what a Winton sea ice needs
+        (``docs/source/design/winton_seaice.md``). Static, like the slab
+        ocean's: it selects a code path at trace time. Default ``False``,
+        because a clamp with no sea ice taking the deficit creates the heat it
+        removes it with, every step it acts. With it ``False`` the deficit is
+        still *published* but nothing removes it, and
+        :func:`jem.fluxes.mask_fluxes_under_ice` is what keeps the surface from
+        cooling further.
+
+        The clamp is applied to the temperature at the time level ``tau`` that
+        the step has just made current, and to the wet surface cells only. See
+        :meth:`_clamp_surface_at_freezing` for why that level is the one the
+        next step reads, and :meth:`_freezing_potential` for the seawater
+        properties the deficit is measured with.
 
     Attributes
     ----------
     name : str
         ``"ocn"``.
-    mask_T, mask_U : jax.Array
-        Land-sea masks on the T and u grids, halo cells removed.
+    clamp_at_freezing : bool
+        The constructor argument of that name.
+    mask_T : jax.Array
+        Land-sea mask on the T grid, halo cells removed.
+    mask_U : jax.Array
+        Land-sea mask on the u grid, halo cells removed.
     mask_surface_Z : jax.Array
         Surface land-sea mask on the zeta (corner) points -- where the
         barotropic streamfunction lives -- halo cells removed.
-    longitude, latitude : jax.Array
-        T-grid cell centres, halo cells removed.
+    longitude : jax.Array
+        T-grid cell centre longitudes, halo cells removed.
+    latitude : jax.Array
+        T-grid cell centre latitudes, halo cells removed.
     dlatitude : jax.Array
         T-grid cell heights, halo cells removed: Veros' ``dyt``, a true
         meridional **distance in metres** whichever coordinates are in use
@@ -294,7 +489,7 @@ class VerosComponent:
 
     name = "ocn"
 
-    def __init__(self, model: Any) -> None:
+    def __init__(self, model: Any, *, clamp_at_freezing: bool = False) -> None:
         """Wrap ``model``; see the class docstring for the parameters."""
         # The settings were applied when this module was imported; re-checking
         # here catches the case where Veros operators were bound to another
@@ -302,6 +497,7 @@ class VerosComponent:
         configure_veros_runtime()
 
         self.model = model
+        self.clamp_at_freezing = bool(clamp_at_freezing)
         settings = model.state.settings
         variables = model.state.variables
 
@@ -330,6 +526,29 @@ class VerosComponent:
         # coordinates those spacings accumulate into are metres too.
         self.longitude_units = "degrees_east" if settings.coord_degree else "m"
         self.latitude_units = "degrees_north" if settings.coord_degree else "m"
+        # Where each T cell really is, for a setup that says its grid lines
+        # are not meridians and parallels; None for an ordinary lat-lon grid,
+        # whose `longitude`/`latitude` axes above already say it.
+        geographic = _geographic_coordinates(model, self.horizontal_shape)
+        self.geographic_longitude: np.ndarray | None = geographic[0]
+        self.geographic_latitude: np.ndarray | None = geographic[1]
+        # The 1-D alternative: the exact axes the output is labelled with when
+        # the grid *is* meridians and parallels but another component's copy
+        # of the axis differs from Veros' in the last bits.
+        axes = _geographic_axes(
+            model, np.asarray(self.longitude), np.asarray(self.latitude),
+            bool(settings.coord_degree),
+        )
+        self.geographic_longitude_axis: np.ndarray | None = axes[0]
+        self.geographic_latitude_axis: np.ndarray | None = axes[1]
+        if geographic[0] is not None and axes[0] is not None:
+            raise ValueError(
+                f"{type(model).__name__} declares both 2-D geographic"
+                " positions (geographic_longitude/geographic_latitude) and"
+                " 1-D output axes (geographic_longitude_axis/"
+                "geographic_latitude_axis); they are two answers to what the"
+                " output is labelled with, so declare one."
+            )
 
         # Which external mode the setup solves is fixed for the whole run, so
         # it is read once here as a Python bool and the `psi` branch in
@@ -392,7 +611,9 @@ class VerosComponent:
         model.set_forcing = lambda state: None
 
     @classmethod
-    def from_setup(cls, setup: str, **setup_kwargs: Any) -> "VerosComponent":
+    def from_setup(
+        cls, setup: str, *, clamp_at_freezing: bool = False, **setup_kwargs: Any
+    ) -> "VerosComponent":
         """Build the component from an importable Veros setup.
 
         The constructor takes an already-built Veros model, which is a live
@@ -413,6 +634,10 @@ class VerosComponent:
             factories -- that is how a case is parameterised by its grid file
             and timesteps -- and which one a path names is only discoverable
             by calling it.
+        clamp_at_freezing : bool, optional
+            The wrapper's own argument of that name (see the class
+            docstring); it is not passed to the setup. ``+ocean.clamp_at_freezing=true``
+            on the command line, which a Winton sea ice requires.
         **setup_kwargs
             Passed to the class or factory.
 
@@ -458,7 +683,7 @@ class VerosComponent:
             # that the class can close over the case's grid and settings.
             model = model()
         model.setup()
-        return cls(model)
+        return cls(model, clamp_at_freezing=clamp_at_freezing)
 
     def bind(
         self,
@@ -540,7 +765,9 @@ class VerosComponent:
         if self._veros_time_zero is None:
             self._veros_time_zero = float(self.model.state.variables.time)
 
-    def _derived_fields(self, state: Any) -> "VerosDerived":
+    def _derived_fields(
+        self, state: Any, ice_frazil_melt_energy: jnp.ndarray | None = None
+    ) -> "VerosDerived":
         """Extract the fields ``VerosDerived`` publishes, from any state.
 
         This is the surface-extraction convention -- the interior slice,
@@ -559,6 +786,11 @@ class VerosComponent:
         state : veros.state.VerosState
             Either the setup's freshly initialized state, or the state
             :meth:`step` has just advanced.
+        ice_frazil_melt_energy : jax.Array, optional
+            The freeze/melt potential to publish. By default it is the
+            potential of ``state`` itself (:meth:`_freezing_potential`); a
+            clamping step passes the potential it measured *before* the clamp
+            removed the deficit, because the clamped ``state`` does not show it.
 
         Returns
         -------
@@ -592,9 +824,91 @@ class VerosComponent:
         sea_fraction = variables.maskT[interior, interior, -1].astype(
             sea_surface_temperature.dtype)
 
+        if ice_frazil_melt_energy is None:
+            ice_frazil_melt_energy = self._freezing_potential(state)
+
         return VerosDerived(  # type: ignore[call-arg]
             sea_surface_temperature, sea_surface_u, sea_surface_v, sea_fraction,
+            ice_frazil_melt_energy.astype(sea_surface_temperature.dtype),
+            jnp.asarray(float(self.clamp_at_freezing),
+                        dtype=sea_surface_temperature.dtype),
         )
+
+    def _freezing_potential(self, state: Any) -> jnp.ndarray:
+        """Return the top cell's freeze/melt potential, CESM's ``frzmlt``, J m-2.
+
+        ``(T_freezing - T_top) * rho_0 * c_p * dz_top`` on wet surface cells and
+        zero on land: positive is a deficit below freezing, negative is heat
+        above it. The heat capacity is ``rho_0 * SEAWATER_HEAT_CAPACITY *
+        dzt[-1]``: the same ``rho_0`` and heat capacity :meth:`step` divides
+        the surface heat flux by to make Veros' ``forc_temp_surface``, so the
+        energy a temperature change of the top cell stands for is measured
+        exactly as the energy a heat flux puts into it. That is what lets the
+        heat a clamp adds equal the heat a sea ice is told it received. (The
+        slab ocean and the Winton ice use ``jem.constants.ocean_density`` and
+        ``ocean_specific_heat_capacity``, 1025 and 3985; Veros' ``rho_0`` and
+        its heat capacity are other numbers, a ~0.2 % difference in what one
+        kelvin of the top cell is worth. It affects the temperature at which a
+        given energy leaves the ocean, never the conservation between ocean
+        and ice, which both count in joules.)
+
+        ``T_freezing`` is ``jem.constants.seawater_freezing_point_K`` read at
+        call time: the value the slab ocean clamps at, the swamp mask compares
+        against and the Winton ice's ``T_FREEZE`` (-1.8 degC) is defined to be,
+        so the coupled model has one freezing point. It is not the saline
+        freezing point Veros' equation of state would give (about -1.9 degC at
+        35 g/kg), which the slab ocean has no counterpart of, nor jax-gcm's
+        ``SEA_ICE_FREEZING_TEMPERATURE``, which only the atmosphere's own
+        stand-in for an absent ice uses.
+        """
+        interior = slice(GHOST_CELLS, -GHOST_CELLS)
+        variables = state.variables
+        temperature = variables.temp[interior, interior, -1, variables.tau] + 273.15
+        wet = variables.maskT[interior, interior, -1] > 0
+        heat_capacity = state.settings.rho_0 * SEAWATER_HEAT_CAPACITY * self.dzt[-1]
+        return jnp.where(
+            wet,
+            (constants.seawater_freezing_point_K - temperature) * heat_capacity,
+            0.0,
+        )
+
+    def _clamp_surface_at_freezing(self, state: Any) -> Any:
+        """Raise a sub-freezing top cell to the freezing point, on the level Veros reads next.
+
+        Which level is the whole point. A Veros step reads ``temp`` only at
+        ``tau`` (advection and the density); the Adams-Bashforth
+        extrapolation reads the *tendencies* ``dtemp`` at ``tau`` and
+        ``taum1``, never ``temp`` at ``taum1``. It writes ``taup1`` and then
+        permutes ``(taum1, tau, taup1) <- (tau, taup1, taum1)``, so the level
+        the *next* step reads as ``tau`` is the one this step has just
+        computed -- the level :meth:`step` publishes its diagnostics from.
+        Clamping exactly that level means the clamped state is the one the
+        ocean integrates from and the one the sea ice is told about. Clamping
+        ``taum1`` instead would change a level nothing reads, and copying a
+        clamped value into it would add a write that does nothing:
+        ``tests/unit/test_veros_seaice.py`` perturbs ``taum1`` and shows the
+        next step is bit-identical.
+
+        Only wet surface cells are touched, and the update is pointwise, so it
+        needs no halo exchange: a halo cell is a copy of an interior cell and
+        is raised by the same arithmetic. The heat added is
+        ``(T_freezing - T) * heat capacity`` on the cells raised
+        (:meth:`_freezing_potential`'s positive part), which is the energy the
+        sea ice receives as ``ice_frazil_melt_energy``.
+        """
+        from veros.core.operators import at, update
+
+        variables = state.variables
+        tau = variables.tau
+        wet = variables.maskT[:, :, -1] > 0
+        freezing_celsius = constants.seawater_freezing_point_K - 273.15
+        surface = variables.temp[:, :, -1, tau]
+        with variables.unlock():
+            variables.temp = update(
+                variables.temp, at[:, :, -1, tau],
+                jnp.where(wet, jnp.maximum(surface, freezing_celsius), surface),
+            )
+        return state
 
     def initialize(self) -> Carry:
         """Build the initial carry without integrating the model.
@@ -609,6 +923,13 @@ class VerosComponent:
         fictitious freezing-point ocean instead of the setup's actual
         (e.g. ~288 K) surface temperature.
 
+        With ``clamp_at_freezing`` the initial surface is held at the freezing
+        point too, as the slab ocean's initial condition is: an initial
+        temperature below freezing is a heat deficit, and a sea ice told of it
+        in the first exchange would be given energy no clamp had removed. That
+        is done on a copy of the setup's state, so ``model.state`` itself is
+        not modified, and the first exchange sees no deficit.
+
         Returns
         -------
         dict
@@ -616,9 +937,28 @@ class VerosComponent:
             "forcing": VerosForcing}``.
 
         """
+        state = self.model.state
+        if not self.clamp_at_freezing:
+            return {
+                "state": state,
+                "derived": self._derived_fields(state),
+                "forcing": VerosForcing.zeros(self.horizontal_shape),
+            }
+        # A flatten-and-rebuild copy, which is what `fori_loop` makes of the
+        # state every step.
+        state = jax.tree_util.tree_map(lambda leaf: leaf, state)
+        n_raised = int(jnp.sum(self._freezing_potential(state) > 0))
+        if n_raised:
+            logger.info(
+                "%s: the initial surface is below the freezing point in %d wet"
+                " column(s); it is raised to freezing, as the slab ocean's"
+                " initial condition is (clamp_at_freezing).", self.name, n_raised,
+            )
+        state = self._clamp_surface_at_freezing(state)
         return {
-            "state": self.model.state,
-            "derived": self._derived_fields(self.model.state),
+            "state": state,
+            "derived": self._derived_fields(
+                state, ice_frazil_melt_energy=jnp.zeros(self.horizontal_shape)),
             "forcing": VerosForcing.zeros(self.horizontal_shape),
         }
 
@@ -671,6 +1011,7 @@ class VerosComponent:
         # to numpy operators.
         from veros.core.operators import at, update
         from veros.core.operators import numpy as npx
+        from veros.core.utilities import enforce_boundaries
 
         interior = slice(GHOST_CELLS, -GHOST_CELLS)
         state = carry["state"]
@@ -679,16 +1020,30 @@ class VerosComponent:
         settings = state.settings
 
         with variables.unlock():
-            variables.surface_taux = update(
-                variables.surface_taux, at[interior, interior],
-                forcing.surface_taux,
+            # The coupler supplies the interior only. The TKE forcing below
+            # averages each stress with its western (or southern) neighbour,
+            # which for the first interior column of a zonally periodic grid
+            # is a ghost cell, so the halo is filled from the other side of
+            # the seam before anything reads it.
+            variables.surface_taux = enforce_boundaries(
+                update(
+                    variables.surface_taux, at[interior, interior],
+                    forcing.surface_taux,
+                ),
+                settings.enable_cyclic_x,
             )
-            variables.surface_tauy = update(
-                variables.surface_tauy, at[interior, interior],
-                forcing.surface_tauy,
+            variables.surface_tauy = enforce_boundaries(
+                update(
+                    variables.surface_tauy, at[interior, interior],
+                    forcing.surface_tauy,
+                ),
+                settings.enable_cyclic_x,
             )
             if settings.enable_tke:
-                # Follows Veros' own `setups/global_1deg`.
+                # Follows Veros' own `setups/global_1deg`: the forcing is the
+                # kinematic stress magnitude, |tau| / rho_0 in m2 s-2, to the
+                # power 3/2. The floor is a stress too, so it is divided by
+                # rho_0 with the rest (see MIN_STRESS_MAGNITUDE).
                 surface_stress_squared = (
                     (0.5 * (variables.surface_taux[1:-1, 1:-1]
                             + variables.surface_taux[:-2, 1:-1])
@@ -698,8 +1053,10 @@ class VerosComponent:
                        / settings.rho_0) ** 2
                 )
                 surface_stress_magnitude = npx.sqrt(
-                    npx.maximum(surface_stress_squared,
-                                MIN_STRESS_MAGNITUDE ** 2)
+                    npx.maximum(
+                        surface_stress_squared,
+                        (MIN_STRESS_MAGNITUDE / settings.rho_0) ** 2,
+                    )
                 )
                 variables.forc_tke_surface = update(
                     variables.forc_tke_surface, at[1:-1, 1:-1],
@@ -739,7 +1096,16 @@ class VerosComponent:
         variables = state.variables
         tau = variables.tau
 
-        derived = self._derived_fields(state)
+        # The freeze/melt potential of the integrated state, measured before a
+        # clamp removes the deficit it is the size of. The clamp is static
+        # configuration, so only one branch is traced.
+        ice_frazil_melt_energy = self._freezing_potential(state)
+        if self.clamp_at_freezing:
+            state = self._clamp_surface_at_freezing(state)
+            variables = state.variables
+
+        derived = self._derived_fields(
+            state, ice_frazil_melt_energy=ice_frazil_melt_energy)
         sea_surface_temperature = derived.sea_surface_temperature
         sea_surface_u = derived.sea_surface_u
         sea_surface_v = derived.sea_surface_v
@@ -758,6 +1124,7 @@ class VerosComponent:
         diagnostics = {
             "sea_surface_temperature": sea_surface_temperature,
             "sea_surface_salinity": sea_surface_salinity,
+            "ice_frazil_melt_energy": derived.ice_frazil_melt_energy,
             "sea_surface_u": sea_surface_u,
             "sea_surface_v": sea_surface_v,
             "temp": variables.temp[interior, interior, :, tau],
@@ -796,7 +1163,7 @@ class VerosComponent:
             diagnostics["ssh"] = (
                 variables.psi[interior, interior, tau] / state.settings.grav
             )
-        # Veros' own driver no longer calls `isoneutral_diag_streamfunction`
+        # Veros' own driver does not call `isoneutral_diag_streamfunction`
         # (its diagnostics block is commented out to keep the step jittable),
         # so `B1_gm` is never filled in by the model; the kernel is evaluated
         # here on the evolved state instead, from the slopes and `K_gm` of the
@@ -1052,12 +1419,20 @@ class VerosComponent:
             ``u`` and for the depth integral behind ``psi``, and
             ``mask_surface_Z`` for the zeta points ``psi`` itself sits on,
             where its values over land are an artefact of the integration.
-            The ``time`` coordinate is the absolute ``datetime64[ns]`` axis
+            The ``time`` coordinate is the absolute ``datetime64[ms]`` axis
             :meth:`~jem.base.component.TimeAxis.datetimes` builds from ``time``,
             the same one every other component labels its output with, so
-            ``xr.merge`` joins the records instead of unioning two axes -- or,
-            as before this coordinate was written at all, leaving the ocean's
-            ``time`` as a bare 0..n-1 index that means nothing.
+            ``xr.merge`` joins the records instead of unioning two axes.
+            The horizontal dimensions are ``("lon", "lat")`` for a grid whose
+            axes are meridians and parallels, labelled with Veros' own T-grid
+            axes or with the 1-D axes the setup declared (see the class
+            docstring). A setup that declares its cells' true 2-D positions
+            (a rotated pole) is written on index dimensions ``("x", "y")``
+            instead, with 2-D ``longitude``/``latitude`` auxiliary coordinates
+            holding those positions, a CF ``coordinates`` attribute on every
+            horizontal variable, and Veros' axes kept as
+            ``native_lon``/``native_lat``; its vectors (``u``, ``v``, the
+            wind stress) are along the grid's own directions and say so.
             ``ssh`` is present only for a run that solves the linear free
             surface, because that is the only regime in which Veros carries
             a sea surface height; ``step`` emits it on the same static
@@ -1072,47 +1447,49 @@ class VerosComponent:
                 " passed here are not the ones this run produced."
             )
 
+        # The horizontal dimensions follow the output convention every
+        # component shares (`jem.components.coordinates`): `lon`/`lat` for a
+        # grid whose axes are meridians and parallels, and index dimensions
+        # `x`/`y` under 2-D `longitude`/`latitude` for one whose axes are not.
+        x, y = self._horizontal_dims()
         dataset = xr.Dataset(
             data_vars={
-                "temp": (["time", "lon", "lat", "depth"], diagnostics["temp"]),
-                "salt": (["time", "lon", "lat", "depth"], diagnostics["salt"]),
-                "u": (["time", "lon", "lat", "depth"], diagnostics["u"]),
-                "v": (["time", "lon", "lat", "depth"], diagnostics["v"]),
-                "sea_surface_temperature": (["time", "lon", "lat"], diagnostics["sea_surface_temperature"]),
-                "sea_surface_u": (["time", "lon", "lat"], diagnostics["sea_surface_u"]),
-                "sea_surface_v": (["time", "lon", "lat"], diagnostics["sea_surface_v"]),
-                "sea_surface_salinity": (["time", "lon", "lat"], diagnostics["sea_surface_salinity"]),
-                "psi": (["time", "lon", "lat"], diagnostics["psi"]),
+                "temp": (["time", x, y, "depth"], diagnostics["temp"]),
+                "salt": (["time", x, y, "depth"], diagnostics["salt"]),
+                "u": (["time", x, y, "depth"], diagnostics["u"]),
+                "v": (["time", x, y, "depth"], diagnostics["v"]),
+                "sea_surface_temperature": (["time", x, y], diagnostics["sea_surface_temperature"]),
+                "sea_surface_u": (["time", x, y], diagnostics["sea_surface_u"]),
+                "sea_surface_v": (["time", x, y], diagnostics["sea_surface_v"]),
+                "sea_surface_salinity": (["time", x, y], diagnostics["sea_surface_salinity"]),
+                "ice_frazil_melt_energy": (["time", x, y], diagnostics["ice_frazil_melt_energy"]),
+                "psi": (["time", x, y], diagnostics["psi"]),
                 forcing_variable("surface_air_temperature"): (
-                    ["time", "lon", "lat"], diagnostics["surface_air_temperature"]),
+                    ["time", x, y], diagnostics["surface_air_temperature"]),
                 forcing_variable("surface_taux"): (
-                    ["time", "lon", "lat"], diagnostics["surface_taux"]),
+                    ["time", x, y], diagnostics["surface_taux"]),
                 forcing_variable("surface_tauy"): (
-                    ["time", "lon", "lat"], diagnostics["surface_tauy"]),
+                    ["time", x, y], diagnostics["surface_tauy"]),
                 forcing_variable("heat_flux"): (
-                    ["time", "lon", "lat"], diagnostics["heat_flux"]),
+                    ["time", x, y], diagnostics["heat_flux"]),
                 forcing_variable("freshwater_flux"): (
-                    ["time", "lon", "lat"], diagnostics["freshwater_flux"]),
+                    ["time", x, y], diagnostics["freshwater_flux"]),
                 forcing_variable("runoff_mass_rate"): (
                     ["time"], diagnostics["runoff_mass_rate"]),
-                "mask_T": (["lon", "lat", "depth"], self.mask_T),
-                "mask_surface_T": (["lon", "lat"], self.mask_T[:, :, -1]),
-                "mask_U": (["lon", "lat", "depth"], self.mask_U),
-                "mask_surface_U": (["lon", "lat"], self.mask_U[:, :, -1]),
-                "mask_surface_Z": (["lon", "lat"], self.mask_surface_Z),
+                "mask_T": ([x, y, "depth"], self.mask_T),
+                "mask_surface_T": ([x, y], self.mask_T[:, :, -1]),
+                "mask_U": ([x, y, "depth"], self.mask_U),
+                "mask_surface_U": ([x, y], self.mask_U[:, :, -1]),
+                "mask_surface_Z": ([x, y], self.mask_surface_Z),
                 "dzt": (["depth"], self.dzt),
             },
             coords={
                 # ``attrs`` is a fresh dict per access, so xarray -- which
                 # keeps the dict it is handed -- gets one of its own.
                 "time": (["time"], time.datetimes(), time.attrs),
-                "lon": (["lon"], self.longitude),
-                "lat": (["lat"], self.latitude),
+                **self._horizontal_coordinates(),
             },
         )
-
-        dataset.lon.attrs = {"long_name": "T-grid longitude", "units": self.longitude_units}
-        dataset.lat.attrs = {"long_name": "T-grid latitude", "units": self.latitude_units}
 
         # Nothing in the numbers says whether `psi` is Veros' own prognostic
         # streamfunction or the diagnosis that stands in for it, so the
@@ -1146,7 +1523,7 @@ class VerosComponent:
             " Like `u` and `v` it lives on Veros' staggered grid -- here the"
             " zeta (corner) points, whose surface land-sea mask is published"
             " as `mask_surface_Z` -- but is labelled with the T-grid"
-            " `lon`/`lat` coordinates this dataset uses throughout."
+            " horizontal coordinates this dataset uses throughout."
         )
 
         # `jem_role` records which section of the carry each variable came
@@ -1155,7 +1532,7 @@ class VerosComponent:
         # configuration, not state, diagnostics or forcing -- so they carry no
         # role.
         var_attrs = {
-            "temp": {"long_name": "ocean potential temperature", "units": "deg C",
+            "temp": {"long_name": "ocean conservative temperature", "units": "deg C",
                      **role_attrs("state")},
             "salt": {"long_name": "ocean salinity", "units": "g/kg",
                      **role_attrs("state")},
@@ -1174,6 +1551,18 @@ class VerosComponent:
                               **role_attrs("derived")},
             "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg",
                                      **role_attrs("derived")},
+            "ice_frazil_melt_energy": {
+                "long_name": "freeze/melt potential of the top cell (frzmlt)",
+                "units": "J m-2",
+                "comment": (
+                    "(T_freezing - T_top) * rho_0 * c_p * dz_top at the end of"
+                    " the coupling step, before the clamp: positive is the"
+                    " heat a clamp at the freezing point added (so a sea ice"
+                    " forms that much ice), negative is heat above freezing"
+                    " available to melt ice. Published whether or not the"
+                    " ocean clamps (clamp_at_freezing)."
+                ),
+                **role_attrs("derived")},
             "psi": {"long_name": "barotropic streamfunction", "units": "m^3/s",
                     "comment": psi_comment, **role_attrs("derived")},
             forcing_variable("surface_air_temperature"): {
@@ -1212,9 +1601,9 @@ class VerosComponent:
         # The sea surface height exists only where `step` emitted one, so it
         # is added rather than sitting in the literals above. Unlike `psi` it
         # needs no staggering note: it is a T-grid field, the grid this
-        # dataset's `lon`/`lat` already label.
+        # dataset's horizontal coordinates already label.
         if not self.enable_streamfunction:
-            dataset["ssh"] = (["time", "lon", "lat"], diagnostics["ssh"])
+            dataset["ssh"] = (["time", x, y], diagnostics["ssh"])
             var_attrs["ssh"] = {
                 "long_name": "sea surface height", "units": "m",
                 "comment": (
@@ -1235,7 +1624,7 @@ class VerosComponent:
 
         # The GM streamfunction exists only where `step` emitted one.
         if self.enable_gm_streamfunction:
-            dataset["B1_gm"] = (["time", "lon", "lat", "depth"], diagnostics["B1_gm"])
+            dataset["B1_gm"] = (["time", x, y, "depth"], diagnostics["B1_gm"])
             var_attrs["B1_gm"] = {
                 "long_name": "zonal component of the GM (eddy-induced) streamfunction",
                 "units": "m^2/s",
@@ -1243,7 +1632,7 @@ class VerosComponent:
                     "Veros' `B1_gm` (isoneutral_diag_streamfunction), on the"
                     " V grid in the horizontal and at the top face of each"
                     " `depth` cell in the vertical, labelled with the T-grid"
-                    " `lon`/`lat` and cell-centre `depth` like `v`. Its"
+                    " horizontal coordinates and cell-centre `depth` like `v`. Its"
                     " zonal integral, sum(B1_gm * dxt * cos(lat_u)), is the"
                     " eddy-induced meridional overturning streamfunction on"
                     " geopotentials in Veros' convention (Veros'"
@@ -1259,7 +1648,69 @@ class VerosComponent:
         for name, attrs in var_attrs.items():
             dataset[name].attrs = attrs
 
+        if self.geographic_longitude is not None:
+            # On a rotated grid the vectors are along the grid's own axes,
+            # not east and north, and nothing in a name like "zonal" says so.
+            for name in ("u", "v", "sea_surface_u", "sea_surface_v",
+                         forcing_variable("surface_taux"),
+                         forcing_variable("surface_tauy")):
+                dataset[name].attrs["comment"] = (
+                    "a component along this grid's own x/y direction"
+                    " (`native_lon`/`native_lat`), which is rotated from"
+                    " geographic east/north; `longitude`/`latitude` give each cell's"
+                    " true position"
+                )
+            geolocate(dataset)
+
         return dataset
+
+    def _horizontal_dims(self) -> tuple[str, str]:
+        """Return the names of the two horizontal output dimensions.
+
+        ``("lon", "lat")`` for a grid whose axes are meridians and parallels,
+        so that its dataset shares dimensions with the atmosphere's;
+        ``("x", "y")`` for a rotated one, because CF and xarray forbid a 2-D
+        variable named after one of its own dimensions and the true positions
+        of such a grid are 2-D.
+        """
+        if self.geographic_longitude is None:
+            return SEPARABLE_DIMS
+        return CURVILINEAR_DIMS
+
+    def _horizontal_coordinates(self) -> dict[str, tuple]:
+        """Return the horizontal coordinate variables of the output dataset.
+
+        Three cases, by what the setup declared (see the class docstring). With
+        nothing declared, Veros' own T-grid axes. With 1-D axes, those, with the
+        attributes the atmosphere's own axes carry. A rotated grid has 2-D
+        ``longitude``/``latitude`` -- where each cell really is -- over the
+        index dimensions, and keeps Veros' axes as ``native_lon``/
+        ``native_lat``: they are what the grid's metric terms and the
+        directions of ``u``/``v`` refer to, but labelling them as positions
+        would put every cell up to the pole's displacement away from where it is.
+        """
+        if (self.geographic_longitude_axis is not None
+                and self.geographic_latitude_axis is not None):
+            return separable_coordinates(
+                self.geographic_longitude_axis, self.geographic_latitude_axis)
+        if self.geographic_longitude is None or self.geographic_latitude is None:
+            return {
+                "lon": (["lon"], self.longitude,
+                        {"long_name": "T-grid longitude", "units": self.longitude_units}),
+                "lat": (["lat"], self.latitude,
+                        {"long_name": "T-grid latitude", "units": self.latitude_units}),
+            }
+        x, y = self._horizontal_dims()
+        return {
+            **curvilinear_coordinates(
+                self.geographic_longitude, self.geographic_latitude),
+            "native_lon": ([x], self.longitude,
+                           {"long_name": "T-grid longitude on the grid's own (rotated) axis",
+                            "units": self.longitude_units}),
+            "native_lat": ([y], self.latitude,
+                           {"long_name": "T-grid latitude on the grid's own (rotated) axis",
+                            "units": self.latitude_units}),
+        }
 
     def save_carry(self, carry: Carry, directory: Path) -> None:
         """Write the carry to ``directory`` (:class:`~jem.base.component.SupportsCheckpoint`).
@@ -1271,6 +1722,20 @@ class VerosComponent:
         and is written beside it by :func:`jem.checkpoint.save`, under the
         same file name a coupled checkpoint uses, so one directory has one
         carry file however deep in the model it sits.
+
+        Veros' restart omits the iteration counter ``itt`` (its ``Variable``
+        is not ``write_to_restart``), and the next step reads it:
+        ``solve_pressure`` takes ``itt == 0`` to mean "first ever step" and
+        overwrites every time level of the pressure/streamfunction. A state
+        loaded back with ``itt == 0`` would therefore re-initialise the
+        pressure history instead of continuing it, so ``itt`` is written
+        into the carry file with the other leaves Veros does not store.
+
+        Nothing here keeps a reference to ``directory``: the coupled
+        checkpoint writes into a staging directory that is renamed into place,
+        so the restart path Veros' settings were pointed at for the write is
+        put back afterwards rather than left naming a directory that no longer
+        exists.
 
         Parameters
         ----------
@@ -1286,21 +1751,26 @@ class VerosComponent:
         from veros.restart import write_restart
 
         state = carry["state"]
+        previous_filename = state.settings.restart_output_filename
+        restart_path = directory / VEROS_RESTART_FILENAME
         with state.settings.unlock():
-            state.settings.restart_output_filename = str(
-                directory / VEROS_RESTART_FILENAME
-            )
-            logger.info(
-                "Saving ocean restart file to %s",
-                state.settings.restart_output_filename,
-            )
-        write_restart(state, force=True)
+            state.settings.restart_output_filename = str(restart_path)
+        logger.info("Saving ocean restart file to %s", restart_path)
+        try:
+            write_restart(state, force=True)
+        finally:
+            with state.settings.unlock():
+                state.settings.restart_output_filename = previous_filename
 
         # The restart file first, the pytree carry file last: the coupled
         # checkpoint treats the carry file as the completion marker, and this
         # component keeps the same promise for its own directory.
         save_pytree(
-            {"derived": carry["derived"], "forcing": carry["forcing"]},
+            {
+                "derived": carry["derived"],
+                "forcing": carry["forcing"],
+                "iteration": jnp.asarray(state.variables.itt),
+            },
             directory / CARRY_FILENAME,
         )
 
@@ -1311,7 +1781,10 @@ class VerosComponent:
         returned carry shares that object -- as :meth:`initialize` does. The
         ``derived`` and ``forcing`` structs are poured back into the templates
         :meth:`initialize` builds, so a restart written on another grid is
-        refused by shape rather than silently adopted.
+        refused by shape rather than silently adopted. The iteration counter
+        ``itt``, which Veros' restart does not hold, is restored from the
+        carry file (see :meth:`save_carry` for why a step cannot do without
+        it).
 
         Parameters
         ----------
@@ -1328,6 +1801,7 @@ class VerosComponent:
         from veros.restart import read_restart
 
         state = self.model.state
+        previous_filename = state.settings.restart_input_filename
         with state.settings.unlock():
             state.settings.restart_input_filename = str(
                 directory / VEROS_RESTART_FILENAME
@@ -1335,52 +1809,22 @@ class VerosComponent:
         # Veros refuses to read a restart while `force_overwrite` is on, which
         # this module turns on so that a coupled run may rewrite its own
         # outputs; the context manager puts it back however the read ends.
-        with _veros_runtime_setting("force_overwrite", False):
-            read_restart(state)
+        try:
+            with _veros_runtime_setting("force_overwrite", False):
+                read_restart(state)
+        finally:
+            with state.settings.unlock():
+                state.settings.restart_input_filename = previous_filename
 
         template = {
             "derived": VerosDerived.zeros(self.horizontal_shape),
             "forcing": VerosForcing.zeros(self.horizontal_shape),
+            "iteration": jnp.zeros_like(state.variables.itt),
         }
         stored = load_pytree(template, directory / CARRY_FILENAME)
+        iteration = stored.pop("iteration")
+        with state.variables.unlock():
+            state.variables.itt = jnp.asarray(
+                iteration, dtype=state.variables.itt.dtype
+            )
         return {"state": state, **stored}
-
-
-def make_jem_compatible(
-    model: Any,
-    coupling_timestep: jdt.Timedelta,
-) -> VerosComponent:
-    """Return a :class:`VerosComponent` for ``model``.
-
-    .. deprecated::
-        Construct ``VerosComponent(model)`` directly and register it with a
-        ``Coupler``, which binds the coupling timestep.
-
-    Parameters
-    ----------
-    model : veros.VerosSetup
-        The ocean to wrap.
-    coupling_timestep : jax_datetime.Timedelta
-        Ignored. The coupler now supplies the coupling timestep, together
-        with the start date, through :meth:`VerosComponent.bind`.
-
-    Returns
-    -------
-    VerosComponent
-        A new wrapper. Constructing it still replaces the setup's
-        ``set_forcing`` with a no-op, which a coupled run requires.
-
-    """
-    warnings.warn(
-        "make_jem_compatible() is deprecated: use"
-        " jem.components.veros_component.VerosComponent(model) and register"
-        " it with a Coupler. The returned component is a wrapper object --"
-        " unlike the old function it does not inject"
-        " initialize()/generate_step_function()/predictions_to_xarray()"
-        " onto the VerosSetup, so anything calling those on the model must"
-        " call them on the component instead. The coupling_timestep argument"
-        " is ignored; the Coupler passes it to VerosComponent.bind().",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return VerosComponent(model)

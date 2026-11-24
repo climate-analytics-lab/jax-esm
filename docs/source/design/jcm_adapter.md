@@ -20,29 +20,40 @@ for, which is what makes it possible to decide whether an entry may be
 deleted. `tests/unit/test_jcm_contract.py` walks that list against the
 installed `jcm`, so a jax-gcm rename fails as "jax-gcm renamed or removed X,
 which JAX-ESM used for Y, at revision Z" — at the cheapest possible moment,
-rather than mid-run — and asserts that the revision the CI workflow checks
-out (`JCM_REV` in `.github/workflows/tests.yml`) equals `JCM_SUPPORTED_REV`,
+rather than mid-run. It also parses every `import` of `jcm` under `jem/` and
+fails naming any imported name that no entry covers, so the list cannot fall
+behind the code (it sees imports only; an attribute read off a value a
+jax-gcm function returned is listed by hand). Finally it asserts that the
+revision the CI workflow checks out (`JCM_REV` in `.github/workflows/tests.yml`) equals `JCM_SUPPORTED_REV`,
 so the pin and the workflow cannot drift apart. A non-blocking
 `canary-jcm-dev` job separately tracks jax-gcm's `dev` branch, so drift stays
 visible without blocking a pull request.
 
-The pin is a `dev` commit rather than a release (jax-gcm has no tagged 3.x
-yet), chosen and bumped by the policy in `contract.py`'s own module
-docstring: pin to a `dev` commit validated as a whole against this
-repository's gates, never to the merge commit of one motivating pull request
-or to whatever `dev` happens to be at bump time. The current pin is needed
-for the package-independent surface-exchange contract's near-surface wind
-vector (`wind_u`/`wind_v`, jax-gcm#911/#914), which is what lets JAX-ESM read
-the wind the same way for every physics package (see *The JCM adapter*
-below).
+The pin is a `dev` commit rather than a release -- the newest release,
+3.0.0, predates what the adapter needs, which is why `pyproject.toml`'s `jcm`
+floor is the 3.1.0 the pinned revision reports -- chosen and bumped by the
+policy in `contract.py`'s own module docstring: pin to a commit on `dev` (a
+merge commit there is fine) that this repository's required CI jobs run and
+pass at, never to a sha that is not on `dev` and never to whatever `dev`
+happens to be at bump time without running the gates at it. The current pin is needed for SPEEDY's land and
+sea flux tiles and a coupled sea ice's forcing on `SurfaceExchange`
+(jax-gcm#1213, with SPEEDY's own slab land, jax-gcm#1199, and
+`ForcingData.sea_ice_temperature`, jax-gcm#1205), on top of the
+package-independent near-surface wind vector (`wind_u`/`wind_v`,
+jax-gcm#911/#914) that lets JAX-ESM read the wind the same way for every
+physics package (see *The JCM adapter* below).
 
 **One consequence a coupled configuration has to set explicitly.**
-`jcm.forcing.resolve_align`'s `auto` resolves a boundary condition's
-alignment (climatology vs. transient) only when the file is a known
-mirror/packaged product; anything else needs `atmosphere.forcing.align` set
-by hand in the configuration, rather than guessed from the file's own time
-axis. See the `forcing.align` comments in
-`jem/config/configuration/{veros-double-drake,veros-earth}.yaml`.
+`jcm.forcing.resolve_align` is the one rule for the time alignment of an
+atmosphere boundary condition (climatology vs. transient). An explicit
+`wrap_year`, `by_date` or `by_date_interp` is taken as given. `auto`, the
+default, resolves only a data-mirror or packaged product, whose alignment the
+mirror manifest records; for any other file (a user's own, or an in-memory
+dataset) it raises `ValueError` instead of guessing from the file's own time
+axis, because a one-year transient archive and a monthly climatology look
+alike. A configuration that reads a user-supplied forcing file therefore sets
+`atmosphere.forcing.align` itself; the YAMLs under
+`jem/config/configuration/` that do so say which value and why.
 
 ## The JCM adapter
 
@@ -65,7 +76,7 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
                           sea_total_heat_flux, sea_total_freshwater_flux,
                           sea_evaporation, sea_eastward_wind_stress,
                           sea_northward_wind_stress, sea_fraction,
-                          land_evaporation,
+                          land_evaporation, land_total_heat_flux,
                           downward_shortwave_flux, downward_longwave_flux,
                           wind_speed, normalized_surface_pressure,
                           sea_air_temperature, sea_air_specific_humidity,
@@ -137,7 +148,8 @@ contract's per-tile fields by tile *name* (`SurfaceExchange.tile`, never an
 assumed index): SPEEDY's `sea` tile, or the fraction-weighted mean of a
 `water` and a `sea_ice` tile (`exchange_fields.sea_tile`). They are what the
 standard exchange tables hand an ocean; the land part's flux stays with the
-atmosphere's own land surface (SPEEDY's slab land). `sea_fraction` is the
+atmosphere's own land surface (SPEEDY's slab land), or goes to a `SlabLandModel`
+through `land_total_heat_flux` (below). `sea_fraction` is the
 part of the cell they are over, `1 - fmask` of the atmosphere's terrain, by
 which a regridder weights them ({doc}`exchange`). Precipitation is one
 field over the whole cell, so it has no sea tile. A package that publishes
@@ -149,6 +161,25 @@ cell will then also receive the land part's flux (jax-esm#147).
 soil supplies ({doc}`bucket_land`); with no land tile it is the grid mean, and
 `JCMComponent.publishes_land_evaporation` is `False`, which
 `default_exchanges` refuses to force a land with.
+
+`land_total_heat_flux` is the net heat flux over the same land tile, in W m⁻²
+and positive upward like every heat flux here (jax-gcm's `net_heat_flux` is
+positive down, so it is negated once, at the boundary). It is what a land that
+integrates its own temperature, `SlabLandModel`, is forced by
+({doc}`slab_land`), and with the sea part's flux it adds up to the grid mean,
+`sea_fraction * sea_total_heat_flux + (1 - sea_fraction) *
+land_total_heat_flux == total_heat_flux`, so a coastal cell's energy is
+neither applied twice nor dropped. Like `land_evaporation` it falls back to the
+grid mean where the package publishes no land tile.
+
+`JCMComponent.integrates_land_temperature` says whether the atmosphere's own
+physics evolves the land's temperature: true when any term of its physics has
+a `land_model` other than `"prescribed"` (SPEEDY's default slab land, ECHAM's
+SLIM). It is read off the physics' static term attributes, nothing is
+integrated, and `check_land_coupling` uses it to refuse a `SlabLandModel` under
+an atmosphere that would be a second slab on the same land. To use that land,
+build the atmosphere with SPEEDY's land prescribed
+(`speedy_physics(land_model="prescribed")`), as `land=slab` does.
 
 The rest are what a sea ice that solves its own surface energy balance reads
 ({doc}`winton_seaice`), taken unchanged from the contract: the downward
@@ -184,10 +215,16 @@ so a Veros-coupled ECHAM atmosphere traces its Tiedtke-Nordeng convection and
 RRTMGP radiation in 64-bit mode; jax-gcm supports that from the pinned
 revision on (jax-gcm#927, fixed by jax-gcm#946).
 `tests/unit/test_veros_setups.py::test_echam_veros_earth_configuration_steps`
-steps `+configuration=veros-earth physics@atmosphere.physics=echam` twice and
-checks every carry field is finite, with ECHAM's prescribed-moisture land
-(`atmosphere.physics.land_model=prescribed`): jax-gcm's default SLIM land
-reads surface properties that exist only on T63 and finer grids, and
+steps `veros-earth`'s ocean under ECHAM physics twice and checks every carry
+field is finite. It is built in the test, not from the command line:
+`veros-earth` composes jax-gcm's calibrated `speedy-t31` bundle, whose
+parameter values a `physics@atmosphere.physics=echam` override would be
+merged into, and its Winton sea ice is forced by the sea flux tile ECHAM
+does not publish (`VerosExchange` refuses the pairing, as the standard table
+does), so the test replaces the composed physics node with the ECHAM
+group's and drops the ice. ECHAM's land is the prescribed-moisture tile
+there (`atmosphere.physics.land_model=prescribed`): jax-gcm's default SLIM
+land reads surface properties that exist only on T63 and finer grids, and
 `veros-earth` is T31.
 
 **Public surface.** Every JCM attribute the wrapper touches is public at the

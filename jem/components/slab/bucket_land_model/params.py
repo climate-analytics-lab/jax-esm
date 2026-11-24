@@ -26,10 +26,10 @@ class BucketLandParameters:
 
     Attributes
     ----------
-    soil_bucket_depth : jnp.ndarray, shape (2,)
-        Depth (m) of the surface and deep layer. Default (0.07, 0.21).
-    drainage_timescale : jnp.ndarray, shape (2,)
-        e-folding time (s) on which each layer's water above its wilting point
+    soil_bucket_depth : jnp.ndarray
+        Shape ``(2,)``: Depth (m) of the surface and deep layer. Default (0.07, 0.21).
+    drainage_timescale : jnp.ndarray
+        Shape ``(2,)``: e-folding time (s) on which each layer's water above its wilting point
         drains: the surface layer into the deep one (percolation), the deep
         layer out of the model. Default (10, 365) days: the deep layer has to
         keep what percolates into it for the land to evaporate near the rate
@@ -37,11 +37,11 @@ class BucketLandParameters:
         runoff is mostly overflow. Tuned in 90-day Earth-like runs against
         the prescribed climatology (``docs/source/design/bucket_land.md``,
         "Tuning the drainage").
-    soil_water_field_capacity : jnp.ndarray, shape (2,)
-        Volumetric water content (m3 m-3) each layer holds at most; what
+    soil_water_field_capacity : jnp.ndarray
+        Shape ``(2,)``: Volumetric water content (m3 m-3) each layer holds at most; what
         rises above it leaves as overflow. Default (0.30, 0.30).
-    soil_water_wilting_point : jnp.ndarray, shape (2,)
-        Volumetric water content (m3 m-3) below which a layer's water neither
+    soil_water_wilting_point : jnp.ndarray
+        Shape ``(2,)``: Volumetric water content (m3 m-3) below which a layer's water neither
         drains nor evaporates. Default (0, 0.17): SPEEDY counts all of the
         surface layer's water and the deep layer's above ``swwil``.
     vegetation_fraction : float or jnp.ndarray

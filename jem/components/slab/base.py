@@ -44,6 +44,11 @@ from jem.base.component import (
     forcing_variable as forcing_variable,
     role_attrs as role_attrs,
 )
+from jem.components.coordinates import (
+    curvilinear_coordinates,
+    geolocated_variable_attrs,
+    separable_coordinates,
+)
 from jem.components.slab.grid import SlabGrid, to_degrees
 
 logger = logging.getLogger(__name__)
@@ -73,20 +78,6 @@ _MONTHS_PER_YEAR = 12
 # the ~0.4 degree spacing of the finest grid JEM supports, so a file written
 # on a genuinely different grid is rejected rather than silently regridded.
 _COORDINATE_TOLERANCE_DEGREES = 1e-3
-
-#: CF attributes for the horizontal coordinates, copied from
-#: ``jcm.cf_metadata._COORD_ATTRS`` so a slab dataset and a JCM dataset
-#: describe their shared axes identically.
-_LONGITUDE_ATTRS = {
-    "standard_name": "longitude",
-    "units": "degrees_east",
-    "long_name": "longitude",
-}
-_LATITUDE_ATTRS = {
-    "standard_name": "latitude",
-    "units": "degrees_north",
-    "long_name": "latitude",
-}
 
 
 def _resolve_dim_name(
@@ -190,40 +181,19 @@ def first_present_variable(path, candidates: tuple[str, ...]) -> str | None:
     return None
 
 
-def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
-    """Load a monthly climatology field onto the model grid.
+def _read_field_on_grid(path, var: str, grid: SlabGrid) -> tuple[xr.DataArray, str | None]:
+    """Read ``var`` from ``path`` and check it against the grid.
 
-    The array is transposed BY NAME rather than by position, so a file written
-    in any axis order loads correctly and a file written on the wrong grid is
-    rejected instead of being reinterpreted: a bare ``jnp.array(ds[var])`` would
-    silently accept any array whose shape happened to fit.
-
-    Lives on the slab base module because every slab component reads its
-    boundary conditions as ``(n_lon, n_lat, 12)`` monthly climatologies on the
-    model grid: the ocean uses it for SST and Q-flux, the sea ice for its
-    initial ice cover.
-
-    Parameters
-    ----------
-    path : str or pathlib.Path
-        Path to a netCDF file.
-    var : str
-        Name of the variable to read.
-    grid : SlabGrid
-        The model grid the file must already be on.
+    The checks both loaders share: the variable exists, its dimensions are
+    longitude, latitude and at most a time dimension, and its coordinates
+    match the grid's.
 
     Returns
     -------
-    jnp.ndarray
-        The field with shape ``(n_lon, n_lat, 12)``.
-
-    Raises
-    ------
-    ValueError
-        If the variable is missing, its dimensions are not recognisable as
-        longitude/latitude/time, it does not have exactly 12 time records, or
-        its coordinates do not match the grid's. The message names the file
-        and the check that failed.
+    field : xarray.DataArray
+        The variable, transposed to ``(lon, lat)`` or ``(lon, lat, time)``.
+    time_name : str or None
+        The name of its time dimension, or None if it has none.
 
     """
     dataset = xr.open_dataset(path)
@@ -235,25 +205,18 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
         )
     field = dataset[var]
 
-    longitude_name, latitude_name, time_name = (
-        _resolve_dim_name(tuple(str(d) for d in field.dims), aliases, path, var)
-        for aliases in _CLIMATOLOGY_DIM_ALIASES
-    )
+    dims = tuple(str(d) for d in field.dims)
+    longitude_aliases, latitude_aliases, time_aliases = _CLIMATOLOGY_DIM_ALIASES
+    longitude_name = _resolve_dim_name(dims, longitude_aliases, path, var)
+    latitude_name = _resolve_dim_name(dims, latitude_aliases, path, var)
+    time_name = next((alias for alias in time_aliases if alias in dims), None)
 
-    unexpected = set(field.dims) - {longitude_name, latitude_name, time_name}
+    unexpected = set(dims) - {longitude_name, latitude_name, time_name}
     if unexpected:
         raise ValueError(
             f"Climatology file \"{path!s:s}\": variable \"{var:s}\" has extra "
-            f"dimensions {sorted(map(str, unexpected))!r}; only longitude, latitude and time "
+            f"dimensions {sorted(unexpected)!r}; only longitude, latitude and time "
             "are supported."
-        )
-
-    n_records = field.sizes[time_name]
-    if n_records != _MONTHS_PER_YEAR:
-        raise ValueError(
-            f"Climatology file \"{path!s:s}\": variable \"{var:s}\" has "
-            f"{n_records:d} \"{time_name:s}\" records; exactly "
-            f"{_MONTHS_PER_YEAR:d} monthly records are required."
         )
 
     for name in (longitude_name, latitude_name):
@@ -280,9 +243,125 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
         var,
     )
 
-    return jnp.asarray(
-        field.transpose(longitude_name, latitude_name, time_name).values
-    )
+    order = (longitude_name, latitude_name) + ((time_name,) if time_name else ())
+    return field.transpose(*order), time_name
+
+
+def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
+    """Load a monthly climatology field onto the model grid.
+
+    The array is transposed BY NAME rather than by position, so a file written
+    in any axis order loads correctly and a file written on the wrong grid is
+    rejected instead of being reinterpreted: a bare ``jnp.array(ds[var])`` would
+    silently accept any array whose shape happened to fit.
+
+    A field with only longitude and latitude dimensions is constant through
+    the year and is repeated into all 12 months, so a static map can be used
+    wherever a monthly climatology is expected. Only a genuinely absent time
+    dimension is read that way: a time axis of any length other than 12,
+    including 1, is rejected, since it is more likely a wrong file than a
+    deliberate constant.
+
+    Lives on the slab base module because every slab component reads its
+    boundary conditions as ``(n_lon, n_lat, 12)`` monthly climatologies on the
+    model grid: the ocean uses it for SST and Q-flux, the sea ice for its
+    initial ice cover, the land for its temperature, snow, soil water,
+    vegetation and albedo.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path to a netCDF file.
+    var : str
+        Name of the variable to read.
+    grid : SlabGrid
+        The model grid the file must already be on.
+
+    Returns
+    -------
+    jnp.ndarray
+        The field with shape ``(n_lon, n_lat, 12)``, in the working precision
+        of the process (float64 under ``jax_enable_x64``, otherwise float32)
+        whatever precision the file stores it in.
+
+    Raises
+    ------
+    ValueError
+        If the variable is missing, its dimensions are not recognisable as
+        longitude/latitude (plus an optional time), it has a time dimension
+        without exactly 12 records, or its coordinates do not match the
+        grid's. The message names the file and the check that failed.
+
+    """
+    field, time_name = _read_field_on_grid(path, var, grid)
+
+    if time_name is None:
+        values = field.values
+        return _in_working_precision(
+            np.broadcast_to(values[..., None], values.shape + (_MONTHS_PER_YEAR,))
+        )
+
+    n_records = field.sizes[time_name]
+    if n_records != _MONTHS_PER_YEAR:
+        raise ValueError(
+            f"Climatology file \"{path!s:s}\": variable \"{var:s}\" has "
+            f"{n_records:d} \"{time_name:s}\" records; exactly "
+            f"{_MONTHS_PER_YEAR:d} monthly records are required."
+        )
+    return _in_working_precision(field.values)
+
+
+def load_static_field(path, var: str, grid: SlabGrid) -> jnp.ndarray:
+    """Load a time-invariant field onto the model grid.
+
+    For boundary data that must not vary in time, such as a glacier fraction.
+    The variable must have only longitude and latitude dimensions; a time
+    dimension of any length, even one with 12 identical months, is rejected,
+    so a monthly file cannot be passed off as a static one. The grid checks
+    are the same as :func:`load_monthly_climatology`'s.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path to a netCDF file.
+    var : str
+        Name of the variable to read.
+    grid : SlabGrid
+        The model grid the file must already be on.
+
+    Returns
+    -------
+    jnp.ndarray
+        The field with shape ``(n_lon, n_lat)``, in the working precision of
+        the process.
+
+    Raises
+    ------
+    ValueError
+        If the variable is missing, has a time or any other extra dimension,
+        or its coordinates do not match the grid's.
+
+    """
+    field, time_name = _read_field_on_grid(path, var, grid)
+    if time_name is not None:
+        raise ValueError(
+            f"Climatology file \"{path!s:s}\": variable \"{var:s}\" has a "
+            f"\"{time_name:s}\" dimension, but it must be constant in time; "
+            "write it with longitude and latitude dimensions only."
+        )
+    return _in_working_precision(field.values)
+
+
+def _in_working_precision(values) -> jnp.ndarray:
+    """Return ``values`` as an array of the process's working float precision.
+
+    ``dtype=float`` is the working precision of the process, not the file's:
+    a component seeds its state from these arrays, and its step computes in the
+    working precision, so a float32 file read at its own dtype under
+    ``jax_enable_x64`` gives a float32 initial state that the first step
+    returns as float64, which ``lax.scan`` rejects.
+    """
+    return jnp.asarray(values, dtype=float)
 
 
 class SlabModelBase(ABC):
@@ -455,7 +534,7 @@ class SlabModelBase(ABC):
         before calling this, so every field is ``(time, *grid.dims)``.
 
         Variables a component was forced with are named with the
-        ``forcing_`` prefix :func:`forcing_variable` applies; its own state and
+        ``forcing_`` prefix :func:`~jem.base.component.forcing_variable` applies; its own state and
         derived diagnostics keep their plain names. That is what lets every
         component of a coupled run be merged into one dataset without two of
         them claiming the same variable. Every variable also carries the
@@ -466,13 +545,16 @@ class SlabModelBase(ABC):
 
         Coordinates follow JCM's, so ``xr.merge`` of an atmosphere dataset and
         a slab dataset from the same run aligns instead of producing an outer
-        join: ``time`` is the absolute ``datetime64[ns]`` axis built by
+        join: ``time`` is the absolute ``datetime64[ms]`` axis built by
         :meth:`jem.base.component.TimeAxis.datetimes`, and a separable grid
         writes 1-D ``lon``/``lat`` in degrees with the same values JCM writes
         for the same coordinate system. A curvilinear grid cannot: it writes
-        2-D auxiliary ``lat``/``lon`` coordinates over index-space dimensions,
-        and each data variable gets the CF ``coordinates`` attribute that
-        points at them.
+        2-D auxiliary ``longitude``/``latitude`` coordinates over index-space
+        dimensions ``x``/``y``, and each data variable on them gets the CF
+        ``coordinates`` attribute that points at them. They are not called
+        ``lon``/``lat`` because the atmosphere's 1-D axes already are, and a
+        merge would keep those and drop the 2-D positions
+        (``jem.components.coordinates``).
 
         Parameters
         ----------
@@ -493,34 +575,18 @@ class SlabModelBase(ABC):
         # dict it is handed -- gets one of its own.
         coords: dict[str, Any] = {"time": ("time", time.datetimes(), time.attrs)}
 
-        grid_dims = self.grid.dims
         if self.grid.is_separable:
-            coords["lon"] = (
-                "lon",
+            coords.update(separable_coordinates(
                 to_degrees(self.grid.longitude_axis_radian),
-                {**_LONGITUDE_ATTRS, "axis": "X"},
-            )
-            coords["lat"] = (
-                "lat",
                 to_degrees(self.grid.latitude_axis_radian),
-                {**_LATITUDE_ATTRS, "axis": "Y"},
-            )
+            ))
         else:
-            # CF forbids ``axis`` on an auxiliary coordinate: it marks a true
-            # coordinate variable, and these are 2-D fields over index-space
-            # dimensions.
-            coords["lon"] = (
-                grid_dims,
+            coords.update(curvilinear_coordinates(
                 to_degrees(self.grid.longitude_radian),
-                dict(_LONGITUDE_ATTRS),
-            )
-            coords["lat"] = (
-                grid_dims,
                 to_degrees(self.grid.latitude_radian),
-                dict(_LATITUDE_ATTRS),
-            )
+            ))
             data_vars = {
-                name: (dims, values, {**attrs, "coordinates": "lat lon"})
+                name: (dims, values, geolocated_variable_attrs(dims, attrs))
                 for name, (dims, values, attrs) in data_vars.items()
             }
 

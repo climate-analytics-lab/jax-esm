@@ -132,8 +132,13 @@ class WintonSeaiceParameters:
         Thermodynamic substeps per coupling step. Static.
     n_flux_iterations : int
         Newton iterations of the implicit surface-temperature solve per
-        substep. Static. The oracle comparison validates a single iteration;
-        coupled runs use three.
+        substep. Static. The oracle comparison validates a single iteration
+        with a linear flux, where one iteration is exact; the nonlinear bulk
+        flux over ice needs more to converge, hence the default of three.
+        The ice-ocean energy budget closes to round-off for any value,
+        because the ice is charged the linearised flux its solve conducted
+        (thsice's ``flxAtm``), not the converged one; fewer iterations change
+        the surface temperature and so the fluxes, not the conservation.
     transport_n_substeps : int
         Substeps of the transport step per coupling step. Static.
 

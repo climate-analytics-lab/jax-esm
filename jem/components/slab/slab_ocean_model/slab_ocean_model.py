@@ -140,14 +140,13 @@ class SlabOceanModel(SlabModelBase):
 
         with ``tau = params.relaxation_time`` and ``T_clim`` read from
         ``sst_clim_file`` (variable ``sst``). A relaxation run REQUIRES that
-        file: without a target there is nothing to relax to, and the previous
-        behaviour -- silently setting tau to infinity and then dereferencing a
-        climatology that was never loaded -- could not work.
+        file: without a target there is nothing to relax to, so the constructor
+        refuses the combination rather than leave a relaxation with no target.
 
     Initial condition
     -----------------
     With an SST climatology, the initial SST is that climatology sampled at
-    the month the run starts in (:attr:`SlabModelBase.start_year_fraction`,
+    the month the run starts in (:attr:`~jem.components.slab.base.SlabModelBase.start_year_fraction`,
     which the coupler sets through ``bind``), held at or above the seawater
     freezing point. The floor matters because an observed "SST" climatology
     is generally a *surface* temperature: where the surface is sea ice the
@@ -175,12 +174,8 @@ class SlabOceanModel(SlabModelBase):
     is the correct thing to relax towards there. Without a climatology it is
     an idealized profile,
     ``params.initial_sst`` at the poles rising by
-    :data:`IDEALIZED_SST_RANGE` towards the equator. ``initial_sst`` is what
-    the constructor has always accepted (as
-    ``initialization_sea_surface_temperature``) but never used: the base of the
-    idealized profile was hard-wired to the freezing point, making the
-    argument dead. Wiring it up moves the default idealized ocean from
-    273-283 K to 288-298 K, which is also the more sensible aquaplanet start.
+    ``IDEALIZED_SST_RANGE`` towards the equator (288-298 K by default, a
+    sensible aquaplanet start).
 
     Freeze/melt potential
     ---------------------
@@ -548,8 +543,8 @@ class SlabOceanModel(SlabModelBase):
             # the class docstring and the output attribute), while
             # ``total_heat_flux`` is UPWARD positive (it cools the mixed layer)
             # and is negated in the update below. Folding Q into the upward flux
-            # therefore needs a minus sign; adding it (as an earlier version
-            # did) silently reversed every prescribed Q-flux experiment.
+            # therefore needs a minus sign; adding it would silently reverse
+            # every prescribed Q-flux experiment.
             total_heat_flux = total_heat_flux - q_flux_snapshot
 
         new_anomaly = time_factor * (

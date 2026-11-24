@@ -1,0 +1,81 @@
+# @package _global_
+#
+# Earth with ECHAM physics: jax-gcm's `t63-echam-1m` atmosphere (ECHAM
+# 1-moment microphysics and RRTMGP radiation at T63 with 47 hybrid levels)
+# over a relaxed slab ocean with SST-diagnosed sea ice.
+#
+#   python -m jem.main +configuration=earth-slab-echam
+#
+# WHAT THE ATMOSPHERE IS: jax-gcm's own configuration, taken whole. The first
+# line of the defaults list composes `jcm/config/configuration/t63-echam-1m.yaml`
+# under `atmosphere`, and nothing below alters it, so the grid, the physics
+# terms and their parameters, the dry Jablonowski-Williamson start, the
+# 12-minute step, ECHAM's upper sponge, the native T63 orography and the
+# present-day boundary conditions are the ones jax-gcm validates and
+# documents there (its comments say why each is what it is). JEM adds only
+# the surface underneath. `tests/unit/test_echam_configuration.py` asserts the
+# composed atmosphere equals the bundle's, key for key.
+#
+# ANOTHER ATMOSPHERE is one override, because the bundle is a group choice:
+#
+#   python -m jem.main +configuration=earth-slab-echam \
+#       configuration@atmosphere=t63-echam-2m
+#
+# selects any other jax-gcm configuration bundle (`python -m jem.main --help`
+# lists them under `+configuration@atmosphere`). The ocean and the sea ice
+# follow it without further overrides: they are built on the atmosphere's
+# grid and read the forcing file it names.
+#
+# WHAT IT NEEDS: jax-gcm's data mirror. The forcing (`hf://bundles/t63/
+# forcing_pd.nc`), the SLIM land surface dataset and whatever else the bundle
+# resolves are fetched once into the local Hugging Face cache, so the first
+# run needs the network. T63 L47 ECHAM is also not a laptop run: a five-day
+# run of this configuration from 1 January took about half an hour of wall
+# time per simulated day on 16 CPU threads (no GPU was tried) and wrote about
+# 290 MB of atmosphere output per day. That is why CI integrates the ECHAM
+# plumbing on jax-gcm's smallest ECHAM grid instead (see
+# `tests/unit/test_echam_configuration.py` for the two overrides that select
+# it) and checks this configuration by composition.
+#
+# WHAT A RUN SHOWS: those five days are the atmosphere's spin-up from its dry
+# start, not a climate. They are finite throughout; the relaxed ocean moves
+# little under it (global-mean SST 290.48 to 290.40 K, no cell by more than
+# 0.9 K) and the diagnosed ice cover holds at 3.8 % of the globe. Nothing
+# longer has been run.
+#
+# WHY each of JEM's settings:
+#  - ocean=slab_relax reading `${atmosphere.forcing.file}`: the SST the slab
+#    relaxes towards is the `sst` of the very file the atmosphere's boundary
+#    conditions come from, named once, so the two cannot describe different
+#    climates and a swapped atmosphere brings its own. A free slab drifts away
+#    from the observed state within months, so an Earth-like run relaxes; the
+#    relaxation time is the model's Python default.
+#  - seaice=slab started from the same file's `icec`: the ice cover ECHAM sees
+#    comes from this component (the exchange overwrites `atm.forcing.sice_am`
+#    with the slab's diagnosed `ice_fraction`), and the exchange runs before
+#    the slab has been handed an SST, so its initial fraction is what the
+#    atmosphere's first coupling step runs on. Starting from the observed
+#    concentration is what stops that being ice-free poles.
+#  - land=none: the land is ECHAM's own (SLIM, inside the atmosphere), on the
+#    bundle's boundary data. The bucket land and the Winton sea ice are not
+#    options here: both need the per-surface flux tiles SPEEDY publishes and
+#    ECHAM does not, and the standard exchange refuses the pairing.
+#  - ECHAM delivers its surface fluxes as grid-cell means (its implicit
+#    vertical-diffusion solve has no per-tile flux to publish), so the slab
+#    ocean under a cell that is partly land receives the cell-mean flux, land
+#    part included; the atmosphere warns once when the coupler is built. The
+#    relaxation bounds the effect on the coast's SST
+#    (docs/source/design/exchange.md).
+defaults:
+  - /configuration@atmosphere: t63-echam-1m
+  - override /ocean: slab_relax
+  - override /seaice: slab
+  - override /land: none
+
+ocean:
+  sst_clim_file: ${atmosphere.forcing.file}
+
+seaice:
+  # The same file's `icec`, for the initial ice cover only; this component has
+  # no relaxation and never reads it again.
+  ice_clim_file: ${atmosphere.forcing.file}
