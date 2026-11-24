@@ -464,6 +464,9 @@ def test_the_ocean_fields_are_the_sea_tile():
     np.testing.assert_allclose(
         0.75 * exchange.sea_total_heat_flux + 0.25 * land_heat_flux_up,
         exchange.total_heat_flux, rtol=1e-6)
+    # ... and the land's heat flux is the land tile in the same convention.
+    np.testing.assert_allclose(exchange.land_total_heat_flux, land_heat_flux_up)
+    np.testing.assert_allclose(exchange.land_total_heat_flux, 40.0)
 
 
 def test_water_and_sea_ice_tiles_combine_into_the_sea_part():
@@ -492,6 +495,9 @@ def test_without_flux_tiles_the_ocean_fields_are_the_grid_mean():
     exchange = exchange_fields.from_diagnostics(
         _fake_echam_diagnostics(), nodal_shape=GRID_SHAPE)
     np.testing.assert_array_equal(exchange.sea_total_heat_flux, exchange.total_heat_flux)
+    # The land's flux falls back to the grid mean the same way.
+    np.testing.assert_array_equal(
+        exchange.land_total_heat_flux, exchange.total_heat_flux)
     np.testing.assert_array_equal(exchange.sea_evaporation, exchange.evaporation)
     np.testing.assert_array_equal(
         exchange.sea_eastward_wind_stress, exchange.eastward_wind_stress)
@@ -853,6 +859,131 @@ def test_the_ocean_fluxes_are_speedys_sea_tile(stepped):
         np.asarray(contract.tile("stress_u", "sea")))
     np.testing.assert_allclose(
         derived.sea_total_heat_flux, derived.total_heat_flux, rtol=1e-5, atol=1e-4)
+
+
+def _build_land_model(land_model: str) -> Model:
+    """Build a SPEEDY model with land and the given ``land_model``.
+
+    The terrain mixes all-land, all-sea and fractional cells, so the land and
+    sea tiles both matter and the cells where they are weighted are covered.
+    """
+    from jcm.physics.speedy.speedy_terms import speedy_physics
+
+    coords = get_speedy_coords(layers=LAYERS, spectral_truncation=TRUNCATION)
+    ix, il = coords.horizontal.nodal_shape
+    fmask = np.zeros((ix, il))
+    fmask[: ix // 3, :] = 1.0
+    fmask[ix // 3: ix // 2, :] = 0.4
+    return Model(
+        coords=coords,
+        terrain=TerrainData.from_coords(coords, fmask=jnp.asarray(fmask)),
+        physics=speedy_physics(land_model=land_model),
+        start_time=START_DATE,
+    )
+
+
+@pytest.fixture(scope="module")
+def slab_land_component() -> JCMComponent:
+    return _bound_component(_build_land_model("slab"))
+
+
+@pytest.fixture(scope="module")
+def prescribed_land_component() -> JCMComponent:
+    return _bound_component(_build_land_model("prescribed"))
+
+
+@pytest.fixture(scope="module")
+def slab_land_stepped(slab_land_component):
+    carry0 = slab_land_component.initialize()
+    carry1, _ = slab_land_component.step(carry0, _coupling_time(0))
+    return carry0, carry1
+
+
+def test_the_land_heat_flux_is_speedys_land_tile(slab_land_component, slab_land_stepped):
+    """``land_total_heat_flux`` is minus SPEEDY's land tile, and the tiles add up.
+
+    Over land, sea and fractional cells alike the sea part's flux and the land
+    part's flux, each weighted by its share of the cell, are the grid-mean
+    flux the atmosphere published: nothing is applied twice or dropped on a
+    coast.
+    """
+    from jcm.physics.surface.surface_exchange import surface_exchange_from
+
+    carry0, carry1 = slab_land_stepped
+    derived = carry1["derived"]
+    contract = surface_exchange_from(derived.physics)
+    land_fraction = 1.0 - np.asarray(slab_land_component.sea_fraction)
+
+    # The terrain has all-land, fractional and all-sea cells, so the check is
+    # not vacuous.
+    assert land_fraction.max() == 1.0 and land_fraction.min() == 0.0
+    assert np.any((land_fraction > 0.0) & (land_fraction < 1.0))
+    np.testing.assert_array_equal(
+        np.asarray(derived.land_total_heat_flux),
+        -np.asarray(contract.tile("net_heat_flux", "land")))
+    np.testing.assert_allclose(
+        np.asarray(derived.sea_fraction) * np.asarray(derived.sea_total_heat_flux)
+        + land_fraction * np.asarray(derived.land_total_heat_flux),
+        np.asarray(derived.total_heat_flux), rtol=1e-5, atol=1e-4)
+    # It differs from the grid mean where there is land, so it is the tile.
+    assert not np.allclose(derived.land_total_heat_flux, derived.total_heat_flux)
+    # The initial carry holds the field with the stepped carry's structure.
+    assert (jax.eval_shape(lambda: carry0["derived"])
+            == jax.eval_shape(lambda: carry1["derived"]))
+
+
+def test_the_component_says_whether_the_atmosphere_integrates_the_land(
+        slab_land_component, prescribed_land_component):
+    """SPEEDY's default slab land integrates a land temperature; ``prescribed`` does not."""
+    assert slab_land_component.integrates_land_temperature is True
+    assert prescribed_land_component.integrates_land_temperature is False
+
+
+def test_integrates_land_temperature_is_read_off_any_terms_land_model():
+    """A term's ``land_model`` decides it, whichever package it is from.
+
+    ECHAM's SLIM is ``"slim"``; a physics none of whose terms has a
+    ``land_model`` integrates no land.
+    """
+    def integrates(terms) -> bool:
+        model = SimpleNamespace(physics=SimpleNamespace(terms=terms))
+        return JCMComponent.integrates_land_temperature.func(
+            SimpleNamespace(model=model))
+
+    assert integrates([SimpleNamespace(land_model="slim")]) is True
+    assert integrates([SimpleNamespace(), SimpleNamespace(land_model="slab")]) is True
+    assert integrates([SimpleNamespace(), SimpleNamespace(land_model="prescribed")]) is False
+    assert integrates([SimpleNamespace()]) is False
+    assert JCMComponent.integrates_land_temperature.func(
+        SimpleNamespace(model=SimpleNamespace(physics=object()))) is False
+
+
+def test_the_land_tile_reads_the_forcing_only_with_a_prescribed_land(
+        slab_land_component, prescribed_land_component):
+    """A prescribed land's flux follows ``forcing.stl_am``; a slab land's is carried.
+
+    With ``land_model="prescribed"`` the land tile sees the temperature an
+    exchanger writes into the forcing, so changing it changes the land tile's
+    heat flux after one coupled step. With the default slab land the carried
+    anomaly ``stl_anom`` is the integrated state, and it evolves.
+    """
+    carry0 = prescribed_land_component.initialize()
+    warmer = carry0["forcing"].copy(stl_am=carry0["forcing"].stl_am + 10.0)
+    base, _ = prescribed_land_component.step(carry0, _coupling_time(0))
+    changed, _ = prescribed_land_component.step(
+        {**carry0, "forcing": warmer}, _coupling_time(0))
+    land = np.asarray(prescribed_land_component.sea_fraction) < 1.0
+    flux_base = np.asarray(base["derived"].land_total_heat_flux)[land]
+    flux_changed = np.asarray(changed["derived"].land_total_heat_flux)[land]
+    # A warmer land loses more heat (positive upward).
+    assert np.all(flux_changed > flux_base)
+    np.testing.assert_array_equal(
+        np.asarray(base["physics"]["_land_model"].stl_anom), 0.0)
+
+    slab0 = slab_land_component.initialize()
+    slab1, _ = slab_land_component.step(slab0, _coupling_time(0))
+    assert not np.allclose(np.asarray(slab1["physics"]["_land_model"].stl_anom),
+                           np.asarray(slab0["physics"]["_land_model"].stl_anom))
 
 
 def test_initialize_does_not_warn_for_a_tiled_atmosphere(model, caplog):

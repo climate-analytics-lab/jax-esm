@@ -66,8 +66,24 @@ def _resolve(target: str):
 #: so ``hasattr(cls, name)`` is not the right question to ask. Each entry maps
 #: a contract ``target`` to a callable returning a representative instance;
 #: nothing is read off these instances beyond whether the attribute exists.
+def _tte_tke_term():
+    """Build ECHAM's vertical-diffusion term with its defaults."""
+    from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion import (
+        TteTkeVerticalDiffusion,
+    )
+
+    return TteTkeVerticalDiffusion()
+
+
 _INSTANCE_FACTORIES = {
     "jcm.model.Model": lambda model: model,
+    "jcm.physics.composable_physics.ComposablePhysics": lambda model: model.physics,
+    # The terms' ``land_model`` is set by ``__init__``; a default-built term
+    # of each class is the faithful probe.
+    "jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux": lambda model: next(
+        t for t in model.physics.terms if type(t).__name__ == "SpeedySurfaceFlux"),
+    "jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion."
+    "TteTkeVerticalDiffusion": lambda model: _tte_tke_term(),
     # ``ModelPredictions.__init__`` only stores what it is handed, and the
     # contract cares about the names it stores under -- so an empty one is a
     # faithful probe and costs nothing.

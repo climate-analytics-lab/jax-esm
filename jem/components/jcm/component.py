@@ -121,7 +121,10 @@ class JCMDerived:
     ``sea_*`` ones are over the sea part of the cell alone, which is what an
     ocean takes (see :mod:`jem.components.jcm.exchange_fields`).
     ``land_evaporation`` is the evaporation over the land part, the land
-    tile, which a land component's soil supplies. The surface radiation, wind
+    tile, which a land component's soil supplies, and ``land_total_heat_flux``
+    is the net heat flux over that same part (positive upward, ``W m-2``),
+    which a land component that integrates the land temperature takes as
+    its forcing. The surface radiation, wind
     speed, normalised surface pressure, the air over the sea part and the
     precipitation by phase (``rainfall``, ``snowfall``) are what a sea ice
     that solves its own surface energy balance reads.
@@ -154,6 +157,7 @@ class JCMDerived:
     sea_northward_wind_stress: jnp.ndarray
     sea_fraction: jnp.ndarray
     land_evaporation: jnp.ndarray
+    land_total_heat_flux: jnp.ndarray
     downward_shortwave_flux: jnp.ndarray
     downward_longwave_flux: jnp.ndarray
     wind_speed: jnp.ndarray
@@ -198,6 +202,7 @@ class JCMDerived:
                 "sea_northward_wind_stress",
                 "sea_fraction",
                 "land_evaporation",
+                "land_total_heat_flux",
                 "downward_shortwave_flux",
                 "downward_longwave_flux",
                 "wind_speed",
@@ -475,6 +480,25 @@ class JCMComponent:
         exchange = _diagnostics_template(self.model).get(SURFACE_EXCHANGE_KEY)
         return exchange is not None and exchange_fields.publishes_land_evaporation(
             exchange)
+
+    @functools.cached_property
+    def integrates_land_temperature(self) -> bool:
+        """Whether the atmosphere's own physics evolves the land temperature.
+
+        True when any term of the model's physics carries a ``land_model``
+        other than ``"prescribed"``: SPEEDY's slab land (``"slab"``, the
+        default of its surface-flux term) or ECHAM's SLIM (``"slim"``). The
+        land temperature the atmosphere sees is then its own prognostic one,
+        and a land component that also integrates a land temperature would
+        be a second slab on the same surface, which
+        :func:`jem.exchangers.check_land_coupling` refuses. Read off the
+        physics' static term attributes, so nothing is integrated; False for
+        a physics with no term that has a ``land_model`` at all.
+        """
+        terms = getattr(self.model.physics, "terms", ())
+        return any(
+            getattr(term, "land_model", "prescribed") != "prescribed"
+            for term in terms)
 
     @functools.cached_property
     def publishes_sea_tiles(self) -> bool:
@@ -781,6 +805,7 @@ class JCMComponent:
             sea_northward_wind_stress=exchange.sea_northward_wind_stress,
             sea_fraction=self.sea_fraction,
             land_evaporation=exchange.land_evaporation,
+            land_total_heat_flux=exchange.land_total_heat_flux,
             downward_shortwave_flux=exchange.downward_shortwave_flux,
             downward_longwave_flux=exchange.downward_longwave_flux,
             wind_speed=exchange.wind_speed,

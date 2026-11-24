@@ -126,7 +126,13 @@ repository's own ``CLAUDE.md`` ("Sign and mask conventions"):
   cell then also receives the land part's flux; :class:`~jem.components.jcm.component.JCMComponent` logs
   that once when it builds its carry. ``land_evaporation`` is the evaporation
   over the land part, the ``land`` tile, which a land component's soil
-  supplies; it falls back to the grid mean the same way, and
+  supplies, and ``land_total_heat_flux`` is the net surface heat flux over
+  that same part (positive upward, like every heat flux here), which a land
+  component that integrates the land temperature takes as its forcing: with
+  the sea part's flux it adds up to the grid mean,
+  ``(1 - fmask) * sea_total_heat_flux + fmask * land_total_heat_flux ==
+  total_heat_flux``, so no part of a coastal cell's energy is applied twice
+  or dropped. Both fall back to the grid mean the same way, and
   :func:`jem.exchangers.default_exchanges` refuses to couple a land to a
   package that has no land tile. See ``docs/source/design/exchange.md`` and
   jax-gcm's ``docs/source/design/surface_exchange.md``.
@@ -247,6 +253,10 @@ class SurfaceExchange(NamedTuple):
         The stress on the sea part of the cell, in the same conventions.
     land_evaporation : jax.Array
         ``evaporation`` over the land part of the cell (the ``land`` tile).
+    land_total_heat_flux : jax.Array
+        ``total_heat_flux`` over the land part of the cell (the ``land``
+        tile), ``W m-2``, positive upward. The grid mean where the package
+        publishes no land tile, like ``land_evaporation``.
     downward_shortwave_flux : jax.Array
         Downward shortwave at the surface, ``W m-2``, positive down.
     downward_longwave_flux : jax.Array
@@ -278,6 +288,7 @@ class SurfaceExchange(NamedTuple):
     sea_eastward_wind_stress: jnp.ndarray
     sea_northward_wind_stress: jnp.ndarray
     land_evaporation: jnp.ndarray
+    land_total_heat_flux: jnp.ndarray
     downward_shortwave_flux: jnp.ndarray
     downward_longwave_flux: jnp.ndarray
     wind_speed: jnp.ndarray
@@ -421,6 +432,7 @@ def from_diagnostics(
         sea_eastward_wind_stress=over_sea("stress_u"),
         sea_northward_wind_stress=over_sea("stress_v"),
         land_evaporation=over_land("evaporation"),
+        land_total_heat_flux=-over_land("net_heat_flux"),
         downward_shortwave_flux=exchange.downward_shortwave_flux.reshape(nodal_shape),
         downward_longwave_flux=exchange.downward_longwave_flux.reshape(nodal_shape),
         wind_speed=exchange.wind_speed.reshape(nodal_shape),

@@ -454,6 +454,35 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " (jem.exchangers' standard tables).",
     ),
     IntegrationPoint(
+        "jcm.physics.composable_physics.ComposablePhysics", "terms", "public",
+        "The ordered term list: JCMComponent.integrates_land_temperature"
+        " reads each term's land_model off it, statically.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux", "land_model",
+        "public",
+        "'slab' (SPEEDY's own prognostic land temperature) or 'prescribed'"
+        " (the land tile sees forcing.stl_am): what"
+        " JCMComponent.integrates_land_temperature reports, and so whether a"
+        " JEM land that integrates the land temperature may be coupled.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion."
+        "TteTkeVerticalDiffusion", "land_model", "public",
+        "ECHAM's land under the land tile ('prescribed' or 'slim'): the term"
+        " JCMComponent.integrates_land_temperature reads for ECHAM.",
+    ),
+    IntegrationPoint(
+        "jcm.forcing.ForcingData", "stl_am", "public",
+        "The land temperature a prescribed-land atmosphere's land tile sees,"
+        " which a JEM land that integrates the land temperature writes"
+        " (jem.exchangers' standard tables).",
+    ),
+    IntegrationPoint(
+        "jcm.forcing.ForcingData", "snowc_am", "public",
+        "The snow cover a JEM land writes (jem.exchangers' standard tables).",
+    ),
+    IntegrationPoint(
         "jcm.forcing.ForcingData", "select", "public",
         "Collapse every TimeSeries leaf to one date's slice."
         " JCMComponent.initialize() takes the fields the coupling supplies"
