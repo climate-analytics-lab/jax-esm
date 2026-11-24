@@ -386,6 +386,12 @@ def collect(params: dict[str, Any] | None = None) -> dict[str, Any]:
 
     jcm_prov_mod = sys.modules.get("jcm.provenance")
     if jcm_prov_mod is not None:
+        # `jcm.provenance.collect()` opens jax-gcm's own record by calling its
+        # `start_run()` when none is open, which empties jax-gcm's registries:
+        # what the atmosphere recorded before any `start_run()` (a run built
+        # in Python) is missing from the merge below. Only jax-gcm can open
+        # its record without clearing it
+        # (https://github.com/climate-analytics-lab/jax-gcm/issues/1236).
         jcm_prov = jcm_prov_mod.collect()
         prov["code"] = probe_code()
         prov["environment"] = jcm_prov["environment"]

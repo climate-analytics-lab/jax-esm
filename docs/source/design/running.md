@@ -299,6 +299,14 @@ per process, so a script that makes several runs calls
 `jem.provenance.start_run()` before it builds each model, or a later run's
 record carries the earlier run's inputs and creation time.
 
+One gap remains for a run built in Python with a JCM atmosphere:
+`jcm.provenance.collect()` still empties jax-gcm's own registries the first
+time it is called without a `start_run()`, so what the atmosphere recorded
+while it was built (the `dated_input_persistence` fact, for one) is missing
+from the sidecars. Calling `jem.provenance.start_run()` before building the
+model avoids it, since that starts jax-gcm's record too
+([jax-gcm#1236](https://github.com/climate-analytics-lab/jax-gcm/issues/1236)).
+
 `subsample=n` keeps every *n*-th coupling step of the **run**, counting from
 its start rather than from the chunk in hand, so an uninterrupted run, the
 same run in different-length chunks, and a run resumed from a checkpoint
