@@ -289,6 +289,16 @@ facts merged from `jcm.provenance`, the atmosphere's effective parameter
 record, and a single `run_hash`. Set `JEM_HASH_INPUTS=1` (or
 `JCM_HASH_INPUTS=1`) to content-hash every recorded input file.
 
+`jem.provenance.start_run(cfg)` is what begins a record and the only call
+that empties one; `jem.runners.run` makes it before it builds the model. A
+run built in Python needs no such call: `run_chunked` opens the record itself
+(`jem.provenance.ensure_started`) and keeps everything recorded before it,
+so a warm start named with `initial_condition` is in the sidecars and in the
+`run_hash` either way. Such a record has no composed config. The record is
+per process, so a script that makes several runs calls
+`jem.provenance.start_run()` before it builds each model, or a later run's
+record carries the earlier run's inputs and creation time.
+
 `subsample=n` keeps every *n*-th coupling step of the **run**, counting from
 its start rather than from the chunk in hand, so an uninterrupted run, the
 same run in different-length chunks, and a run resumed from a checkpoint

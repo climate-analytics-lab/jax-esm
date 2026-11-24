@@ -38,6 +38,18 @@ def _two_slabs() -> Coupler:
     )
 
 
+def _unstarted(monkeypatch) -> None:
+    """Put the module in the state of a process in which nothing called ``start_run``."""
+    monkeypatch.setattr(
+        provenance, "_state", {"base": None, "inputs": {}, "facts": {}}
+    )
+
+
+@pytest.fixture
+def unstarted(monkeypatch):
+    _unstarted(monkeypatch)
+
+
 def test_probe_code_includes_jem():
     code = provenance.probe_code()
     assert "jem" in code
@@ -242,6 +254,112 @@ def test_run_chunked_warm_start_records_checkpoint_digest_across_resume(tmp_path
     assert first_prov["run_hash"] == second_prov["run_hash"]
 
 
+def test_opening_the_record_keeps_what_was_recorded_before_it(tmp_path, unstarted):
+    """A run that never calls ``start_run`` records its inputs before the first
+    ``collect()``; opening the record there must not empty the registries.
+    """
+    grid = tmp_path / "grid.nc"
+    grid.write_bytes(b"grid-data")
+    provenance.record_input(str(grid))
+    provenance.record_fact("initial_condition", "from a donor")
+    opened = provenance._state["base"]["created"]
+
+    prov = provenance.collect()
+    assert str(grid) in prov["inputs"]
+    assert prov["facts"]["initial_condition"] == "from a donor"
+    # The record opened at the first thing recorded, and collect() kept it.
+    assert prov["created"] == opened
+    assert prov["config_yaml"] is None
+    assert provenance.collect()["run_hash"] == prov["run_hash"]
+
+
+def test_ensure_started_does_not_reopen_a_started_record(tmp_path):
+    cfg = OmegaConf.create({"coupled_run": {"total_time": "2 days"}})
+    provenance.start_run(cfg)
+    grid = tmp_path / "grid.nc"
+    grid.write_bytes(b"grid-data")
+    provenance.record_input(str(grid))
+    before = provenance.collect()
+
+    provenance.ensure_started()
+    after = provenance.collect()
+    assert after["created"] == before["created"]
+    assert after["config_yaml"] == before["config_yaml"]
+    assert str(grid) in after["inputs"]
+    assert after["run_hash"] == before["run_hash"]
+
+
+def test_a_python_run_without_start_run_records_its_warm_start(tmp_path, monkeypatch):
+    """The public ``run_chunked(..., initial_condition=donor)`` in a process
+    that never called ``start_run``: the donor is in every sidecar, and two
+    otherwise identical runs from different donors have different run hashes.
+    """
+    donors = {}
+    for name, days in (("short", 1), ("long", 2)):
+        run_chunked(
+            _two_slabs(),
+            total_time=f"{days} days",
+            chunk="1 day",
+            output_dir=tmp_path / f"spinup-{name}",
+        )
+        donors[name] = tmp_path / f"spinup-{name}" / "checkpoint"
+
+    records = {}
+    for name, donor in donors.items():
+        _unstarted(monkeypatch)  # each experiment is its own fresh process
+        exp = tmp_path / f"experiment-{name}"
+        run_chunked(
+            _two_slabs(),
+            total_time="1 day",
+            chunk="1 day",
+            output_dir=exp,
+            initial_condition=donor,
+        )
+        records[name] = json.loads(
+            (exp / "ocn-00000000.nc.provenance.json").read_text()
+        )
+        with xr.open_dataset(exp / "ocn-00000000.nc") as ds:
+            stamped_inputs = json.loads(ds.attrs["jem_prov_inputs"])
+            assert ds.attrs["jem_prov_run_hash"] == records[name]["run_hash"]
+        entry = records[name]["inputs"][str(donor.resolve())]
+        assert "sha256" in entry
+        assert stamped_inputs[str(donor.resolve())]["sha256"] == entry["sha256"]
+
+    short, long = (records[name] for name in ("short", "long"))
+    assert (
+        short["inputs"][str(donors["short"].resolve())]["sha256"]
+        != long["inputs"][str(donors["long"].resolve())]["sha256"]
+    )
+    assert short["run_hash"] != long["run_hash"]
+
+
+def test_run_chunked_opens_the_record_before_the_first_chunk(
+    tmp_path, monkeypatch, unstarted
+):
+    """``created`` is when the run began, so with ``written`` it brackets the
+    first chunk; it is not the moment that chunk's attributes were collected.
+    """
+    open_at_first_stamp = []
+    stamp = provenance.attrs
+
+    def spy(*args, **kwargs):
+        open_at_first_stamp.append(provenance._state["base"])
+        return stamp(*args, **kwargs)
+
+    monkeypatch.setattr(provenance, "attrs", spy)
+    run_chunked(
+        _two_slabs(),
+        total_time="1 day",
+        chunk="1 day",
+        output_dir=tmp_path / "out",
+    )
+    prov = json.loads(
+        (tmp_path / "out" / "ocn-00000000.nc.provenance.json").read_text()
+    )
+    assert open_at_first_stamp[0] is not None
+    assert prov["created"] == open_at_first_stamp[0]["created"]
+
+
 def test_write_chunk_removes_sidecar_when_removing_empty_dataset(tmp_path):
     ds = xr.Dataset(
         {"t": ("time", np.array([1.0, 2.0]))},
@@ -283,6 +401,32 @@ def test_merges_jcm_provenance_when_jcm_is_imported(tmp_path):
     assert prov["facts"]["jem_only"] == "yes"
     assert "data_mirror_revision" in prov["facts"]
     assert "ozone=prescribed:/x/ozone.nc" in provenance.summary()
+
+
+def test_opening_the_record_leaves_jcm_provenance_as_it_is(tmp_path, unstarted):
+    """An atmosphere built before the first ``collect()`` has already recorded
+    its inputs in ``jcm.provenance``; opening JEM's record must not reset it.
+    """
+    jcm_provenance = pytest.importorskip("jcm.provenance")
+
+    jcm_input = tmp_path / "bc.nc"
+    jcm_input.write_bytes(b"boundary-data")
+    cfg = OmegaConf.create({"atmosphere": {"layers": 8}})
+    jcm_provenance.start_run(cfg)
+    try:
+        jcm_provenance.record_input(str(jcm_input))
+        jcm_provenance.record_fact("ozone_source", "prescribed:/x/ozone.nc")
+        jem_input = tmp_path / "grid.nc"
+        jem_input.write_bytes(b"grid-data")
+        provenance.record_input(str(jem_input))
+
+        prov = provenance.collect()
+        assert str(jcm_input) in prov["inputs"]
+        assert str(jem_input) in prov["inputs"]
+        assert prov["facts"]["ozone_source"] == "prescribed:/x/ozone.nc"
+        assert jcm_provenance.collect()["config_yaml"] == OmegaConf.to_yaml(cfg)
+    finally:
+        jcm_provenance.start_run()
 
 
 def test_importing_jem_provenance_does_not_import_components():

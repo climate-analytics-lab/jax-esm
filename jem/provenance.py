@@ -24,6 +24,15 @@ Lifecycle: :func:`start_run` at run start (captures the composed config and
 resets the registries), :func:`record_input` / :func:`record_fact` during
 model build and warm-start setup, :func:`summary` for the one-line run log,
 and :func:`attrs` / :func:`write_sidecar` at chunk-write time.
+
+:func:`start_run` is the only thing that empties the registries. A run driven
+from Python that never calls it still gets a complete record: the record opens
+at the first thing recorded (:func:`ensure_started`, which
+:func:`jem.driver.run_chunked` calls before it records a warm start) and keeps
+everything recorded from then on. The registries are per process, so a script
+that makes more than one run in one process calls :func:`start_run` before
+building each model; otherwise the later run's record carries the earlier
+run's inputs, facts and creation time.
 """
 
 from __future__ import annotations
@@ -263,12 +272,13 @@ def describe_input(path: str | Path, *, force_hash: bool = False) -> dict[str, A
     return d
 
 
-def start_run(cfg: Any = None) -> None:
-    """Reset the registries and capture the composed config at run start.
+def _new_base(cfg: Any = None) -> dict[str, Any]:
+    """Return the part of a record that is fixed when the record opens.
 
-    Code and environment are probed lazily on :func:`collect` so libraries
-    imported during model construction and any post-start ``jax_enable_x64``
-    flip are captured accurately.
+    That is the time it opened and the composed config. Code and environment
+    are not in it: they are probed on every :func:`collect`, so libraries
+    imported during model construction and any later ``jax_enable_x64`` flip
+    are captured accurately.
     """
     config_yaml = None
     if cfg is not None:
@@ -281,15 +291,41 @@ def start_run(cfg: Any = None) -> None:
             # hydra:-runtime interpolations only resolve inside a live
             # Hydra app; the unresolved form still records every choice.
             config_yaml = OmegaConf.to_yaml(cfg, resolve=False)
-    _state["base"] = {
+    return {
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "config_yaml": config_yaml,
     }
+
+
+def start_run(cfg: Any = None) -> None:
+    """Reset the registries and capture the composed config at run start.
+
+    This is the one call that discards what has been recorded, here and in
+    :mod:`jcm.provenance` when it is imported, so it belongs before the model
+    is built: an input recorded during construction is part of the run.
+    """
+    _state["base"] = _new_base(cfg)
     _state["inputs"] = {}
     _state["facts"] = {}
     jcm_prov = sys.modules.get("jcm.provenance")
     if jcm_prov is not None:
         jcm_prov.start_run(cfg)
+
+
+def ensure_started() -> None:
+    """Open the run's record if :func:`start_run` has not, keeping what is recorded.
+
+    A run driven from Python need not call :func:`start_run`, and its inputs
+    are recorded before the first chunk is written. Opening the record must
+    therefore never empty a registry, here or in :mod:`jcm.provenance`: a warm
+    start recorded by :func:`jem.driver.run_chunked` would drop out of the
+    sidecars, and two runs differing only in their donor checkpoint would
+    share a ``run_hash``. The record opened this way has no composed config
+    (``config_yaml`` is ``None``), and its ``created`` is the time of this
+    call.
+    """
+    if _state["base"] is None:
+        _state["base"] = _new_base()
 
 
 def record_input(
@@ -304,6 +340,7 @@ def record_input(
     records the same path with ``force_hash=False``, so an unhashed lookup
     cannot silently downgrade a warm-start digest.
     """
+    ensure_started()
     resolved_str = str(resolved if resolved is not None else requested)
     if not (os.path.isfile(resolved_str) or os.path.isdir(resolved_str)):
         return
@@ -318,6 +355,7 @@ def record_input(
 
 def record_fact(key: str, value: Any) -> None:
     """Record a run-shaping fact (for example, an initial-condition source)."""
+    ensure_started()
     _state["facts"][key] = value
 
 
@@ -343,8 +381,7 @@ def collect(params: dict[str, Any] | None = None) -> dict[str, Any]:
     When :mod:`jcm.provenance` is imported in this process, its recorded
     inputs, facts and data-mirror revision are merged automatically.
     """
-    if _state["base"] is None:
-        start_run()
+    ensure_started()
     prov = dict(_state["base"])
 
     jcm_prov_mod = sys.modules.get("jcm.provenance")

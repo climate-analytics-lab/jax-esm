@@ -633,6 +633,10 @@ def run_chunked(
     output_dir = Path(output_dir)
     checkpoint_dir = _checkpoint_directory(checkpoint_path, output_dir)
 
+    # Open the provenance record here if nothing has (a run built in Python
+    # calls no `start_run`), so that `created` is when the run began and not
+    # when its first chunk was written.
+    _provenance.ensure_started()
     if initial_condition is not None:
         # Hash the warm-start checkpoint BEFORE choosing between fresh start
         # and resume, so a resumed process after preemption records the same
